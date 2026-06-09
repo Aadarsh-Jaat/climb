@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/Climblogo.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Climb — One Place To Climb In Life</title>
+    <meta name="description" content="Track goals, manage money, improve health, grow your career, and build businesses from one powerful dashboard." />
+    
+    <!-- Prevent flash of wrong theme - MUST be in head before rendering -->
+    <script>
+      (function() {
+        try {
+          const theme = localStorage.getItem('theme');
+          if (theme === 'light') {
+            document.documentElement.classList.remove('dark');
+            document.documentElement.classList.add('light');
+          } else if (theme === 'dark') {
+            document.documentElement.classList.add('dark');
+            document.documentElement.classList.remove('light');
+          } else {
+            // Default to dark mode if no preference saved
+            document.documentElement.classList.add('dark');
+          }
+        } catch (e) {
+          // Fallback to dark mode if localStorage fails
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
