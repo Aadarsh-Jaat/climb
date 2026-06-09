@@ -12,6 +12,7 @@ interface AuthContextType {
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   connectionReady: boolean;
+  sessionError: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -57,8 +58,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [connectionReady, setConnectionReady] = useState(false);
+  const [sessionError, setSessionError] = useState(false);
   const loadingRef = useRef(false);
   const initRef = useRef(false);
+  const authTimeoutRef = useRef<NodeJS.Timeout>();
 
   // Pre-warm Supabase connection
   useEffect(() => {
@@ -75,6 +78,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     warmup();
   }, []);
 
+  // Validate and clean up session on mount
+  useEffect(() => {
+    const validateAndCleanSession = async () => {
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        
+        if (error) {
+          console.error('Session validation error:', error);
+          // Clear potentially corrupted session
+          await supabase.auth.signOut();
+          localStorage.removeItem('supabase.auth.token');
+          setSessionError(true);
+          return;
+        }
+        
+        if (session) {
+          // Check if session is expired
+          const expiresAt = session.expires_at;
+          if (expiresAt && expiresAt * 1000 < Date.now()) {
+            console.log('Session expired, signing out');
+            await supabase.auth.signOut();
+            setSessionError(false);
+          }
+        }
+      } catch (err) {
+        console.error('Session validation failed:', err);
+        setSessionError(true);
+      }
+    };
+    
+    validateAndCleanSession();
+  }, []);
+
   const loadProfile = useCallback(async (userId: string, forceRefresh = false): Promise<Profile | null> => {
     if (!forceRefresh && profileCache && profileCache.data?.id === userId && 
         (Date.now() - profileCache.timestamp) < CACHE_DURATION) {
@@ -86,21 +122,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     loadingRef.current = true;
     
     try {
-      await new Promise(resolve => setTimeout(resolve, 50));
-      
-      // Use withRetry properly - wrap the supabase query in an async function
-      const { data, error } = await withRetry(
-        async () => {
-          const result = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', userId)
-            .maybeSingle();
-          return result;
-        },
-        2,
-        'loadProfile'
+      // Add timeout for profile loading
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Profile load timeout')), 10000)
       );
+      
+      const loadPromise = (async () => {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        
+        const { data, error } = await withRetry(
+          async () => {
+            const result = await supabase
+              .from('profiles')
+              .select('*')
+              .eq('id', userId)
+              .maybeSingle();
+            return result;
+          },
+          2,
+          'loadProfile'
+        );
+        
+        if (error) throw error;
+        return { data, error };
+      })();
+      
+      const { data, error } = await Promise.race([loadPromise, timeoutPromise]) as any;
       
       if (error) {
         console.error('Profile load error:', error);
@@ -139,6 +186,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return profileData;
     } catch (err) {
       console.error('Profile error:', err);
+      setSessionError(true);
       return null;
     } finally {
       loadingRef.current = false;
@@ -152,26 +200,57 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [user, loadProfile]);
 
+  const signOut = useCallback(async () => {
+    setSessionError(false);
+    await supabase.auth.signOut();
+    setUser(null);
+    setProfile(null);
+    profileCache = null;
+    localStorage.removeItem('supabase.auth.token');
+  }, []);
+
   useEffect(() => {
     if (initRef.current) return;
     initRef.current = true;
 
     const initAuth = async () => {
+      // Set a timeout for the entire auth initialization
+      authTimeoutRef.current = setTimeout(() => {
+        console.log('Auth initialization timeout');
+        setSessionError(true);
+        setLoading(false);
+      }, 15000);
+      
       try {
         await new Promise(resolve => setTimeout(resolve, 100));
         
-        const { data: { session } } = await supabase.auth.getSession();
+        const { data: { session }, error } = await supabase.auth.getSession();
+        
+        if (error) {
+          console.error('Session error:', error);
+          setSessionError(true);
+          setLoading(false);
+          return;
+        }
+        
         const currentUser = session?.user ?? null;
         setUser(currentUser);
         
         if (currentUser) {
           const profileData = await loadProfile(currentUser.id);
-          if (profileData) setProfile(profileData);
+          if (profileData) {
+            setProfile(profileData);
+            setSessionError(false);
+          }
         }
       } catch (err) {
         console.error('Auth init error:', err);
+        setSessionError(true);
       } finally {
         setLoading(false);
+        if (authTimeoutRef.current) {
+          clearTimeout(authTimeoutRef.current);
+        }
       }
     };
     
@@ -185,23 +264,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (currentUser && (event === 'SIGNED_IN' || event === 'USER_UPDATED')) {
         profileCache = null;
         const profileData = await loadProfile(currentUser.id, true);
-        if (profileData) setProfile(profileData);
+        if (profileData) {
+          setProfile(profileData);
+          setSessionError(false);
+        }
       } else if (event === 'SIGNED_OUT') {
         setProfile(null);
         profileCache = null;
+        setSessionError(false);
       }
       setLoading(false);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+      if (authTimeoutRef.current) {
+        clearTimeout(authTimeoutRef.current);
+      }
+    };
   }, [loadProfile]);
-
-  const signOut = useCallback(async () => {
-    await supabase.auth.signOut();
-    setUser(null);
-    setProfile(null);
-    profileCache = null;
-  }, []);
 
   return (
     <AuthContext.Provider value={{ 
@@ -210,7 +291,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       loading, 
       signOut, 
       refreshProfile,
-      connectionReady 
+      connectionReady,
+      sessionError
     }}>
       {children}
     </AuthContext.Provider>
