@@ -82,7 +82,8 @@ export interface Routine {
   category: Pillar;
   description: string;
   active: boolean;
-  // completed?: boolean;  // Remove this - completion is in RoutineLog
+  order_index?: number;      // ADD THIS - for drag & drop ordering
+  routine_time?: string;  // completed?: boolean;  // Remove this - completion is in RoutineLog
   created_at: string;
   updated_at: string;
 }
@@ -137,6 +138,16 @@ export interface HealthLog {
   mood: number | null;                // ADD THIS
   created_at: string;
   updated_at: string;
+}
+
+export interface HealthPhoto {
+  id: string;
+  user_id: string;
+  photo_url: string;
+  photo_date: string;
+  photo_type: 'front' | 'side' | 'back';
+  notes?: string;
+  created_at: string;
 }
 
 export interface Skill {

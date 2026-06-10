@@ -253,26 +253,26 @@
 
   /* Line clamp utilities */
   .line-clamp-2 {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  box-orient: vertical;
-  overflow: hidden;
-}
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    box-orient: vertical;
+    overflow: hidden;
+  }
 
-.line-clamp-3 {
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-  -webkit-box-orient: vertical;
-  box-orient: vertical;
-  overflow: hidden;
-}
+  .line-clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    box-orient: vertical;
+    overflow: hidden;
+  }
 }
 
 /* Pillar Colors */
-.text-health { color: #22c55e; }  /* Remove text-decoration: underline */
+.text-health { color: #22c55e; }
 .text-knowledge { color: #06b6d4; }
 .text-career { color: #3b82f6; }
 .text-wealth { color: #eab308; }
@@ -351,4 +351,62 @@
 ::selection {
   background-color: var(--text-primary);
   color: var(--bg-body);
+}
+
+/* Mobile optimizations */
+@media (max-width: 768px) {
+  button, 
+  .btn-primary, 
+  .btn-secondary, 
+  .btn-ghost,
+  .nav-item,
+  .card-hover {
+    min-height: 44px;
+  }
+  
+  .p-6 {
+    padding: 1rem;
+  }
+  
+  .md\:p-8 {
+    padding: 1rem;
+  }
+  
+  input, 
+  textarea, 
+  select {
+    font-size: 16px;
+  }
+  
+  .card {
+    border-radius: 12px;
+  }
+  
+  .progress-bar {
+    min-height: 8px;
+  }
+  
+  .modal-content {
+    margin: 1rem;
+    max-height: calc(100vh - 2rem);
+  }
+}
+
+/* Prevent zoom on input focus on iOS */
+@media (max-width: 768px) {
+  input, 
+  select, 
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* Better scrolling for tables/charts on mobile */
+.overflow-x-auto {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Safe area for notched phones */
+.safe-area-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }

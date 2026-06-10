@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { 
   Plus, Check, Trash2, Calendar, Tag, ChevronRight, Edit3, RotateCcw, 
   History, Target, Flame, Activity, X, Save, AlertCircle, TrendingUp,
-  Repeat, FileText, Clock
+  Repeat, FileText, Clock, GripVertical
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
@@ -47,6 +47,7 @@ export default function Planner() {
   const [showGoalForm, setShowGoalForm] = useState(false);
   const [showGoalActivityHistory, setShowGoalActivityHistory] = useState<string | null>(null);
   const [goalActivities, setGoalActivities] = useState<GoalActivity[]>([]);
+  const [draggedRoutineIndex, setDraggedRoutineIndex] = useState<number | null>(null);
 
   // Task/Routine/Habit form
   const [itemTitle, setItemTitle] = useState('');
@@ -55,6 +56,7 @@ export default function Planner() {
   const [itemPriority, setItemPriority] = useState('medium');
   const [itemDesc, setItemDesc] = useState('');
   const [itemNotes, setItemNotes] = useState('');
+  const [itemTime, setItemTime] = useState('');
 
   // Goal form
   const [goalTitle, setGoalTitle] = useState('');
@@ -89,7 +91,6 @@ export default function Planner() {
   const loadAllData = useCallback(async (forceRefresh = false) => {
     if (!user) return;
     
-    // Check cache
     if (!forceRefresh && plannerCache && (Date.now() - plannerCache.timestamp) < CACHE_DURATION) {
       console.log('Using cached planner data');
       setTasks(plannerCache.tasks);
@@ -108,7 +109,7 @@ export default function Planner() {
     try {
       const [t, r, h, g, hist, rl, hl] = await Promise.all([
         supabase.from('tasks').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(100),
-        supabase.from('routines').select('*').eq('user_id', user.id).eq('active', true).order('created_at', { ascending: false }).limit(50),
+        supabase.from('routines').select('*').eq('user_id', user.id).eq('active', true).order('order_index', { ascending: true, nullsFirst: false }).order('created_at', { ascending: false }),
         supabase.from('habits').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50),
         supabase.from('goals').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(30),
         supabase.from('task_history').select('*').eq('user_id', user.id).order('completed_date', { ascending: false }).limit(100),
@@ -155,6 +156,48 @@ export default function Planner() {
     }
   }, [user, loadAllData, initialLoadDone]);
 
+  // Drag and drop handlers for routines
+  const handleDragStart = (index: number) => {
+    setDraggedRoutineIndex(index);
+  };
+
+  const handleDragOver = (e: React.DragEvent, index: number) => {
+    e.preventDefault();
+    if (draggedRoutineIndex === null || draggedRoutineIndex === index) return;
+    
+    // Reorder in local state
+    const newRoutines = [...routines];
+    const draggedItem = newRoutines[draggedRoutineIndex];
+    newRoutines.splice(draggedRoutineIndex, 1);
+    newRoutines.splice(index, 0, draggedItem);
+    
+    // Update order_index for all routines
+    const updatedRoutines = newRoutines.map((routine, idx) => ({
+      ...routine,
+      order_index: idx
+    }));
+    
+    setRoutines(updatedRoutines);
+    setDraggedRoutineIndex(index);
+  };
+
+  const handleDragEnd = async () => {
+    if (!user) return;
+    
+    // Save new order to database
+    for (let i = 0; i < routines.length; i++) {
+      const routine = routines[i];
+      if (routine.order_index !== i) {
+        await supabase
+          .from('routines')
+          .update({ order_index: i, updated_at: new Date().toISOString() })
+          .eq('id', routine.id);
+      }
+    }
+    plannerCache = null;
+    setDraggedRoutineIndex(null);
+  };
+
   // Reset form
   const resetForm = () => {
     setItemTitle('');
@@ -163,6 +206,7 @@ export default function Planner() {
     setItemPriority('medium');
     setItemDesc('');
     setItemNotes('');
+    setItemTime('');
     setShowAddForm(false);
   };
 
@@ -291,7 +335,7 @@ export default function Planner() {
     setSaving(false);
   };
 
-  // ROUTINE CRUD
+  // ROUTINE CRUD with time
   const toggleRoutine = async (routine: Routine) => {
     if (!user) return;
     
@@ -355,6 +399,8 @@ export default function Planner() {
             title: itemTitle.trim(),
             description: itemDesc?.trim() || '',
             category: itemCat.toLowerCase(),
+            routine_time: itemTime || null,
+            order_index: routines.length, // Add at the end
             active: true,
           })
           .select()
@@ -362,7 +408,7 @@ export default function Planner() {
         
         if (error) throw error;
         if (data) {
-          setRoutines(prev => [data as Routine, ...prev]);
+          setRoutines(prev => [...prev, data as Routine]);
           plannerCache = null;
           resetForm();
           setSaving(false);
@@ -380,7 +426,7 @@ export default function Planner() {
     setSaving(false);
   };
 
-  // HABIT CRUD
+  // HABIT CRUD (keeping existing)
   const toggleHabit = async (habit: Habit, date: string) => {
     if (!user) return;
     
@@ -810,11 +856,28 @@ export default function Planner() {
     setItemTitle('');
     setItemDesc('');
     setItemNotes('');
+    setItemTime('');
     setItemCat('personal');
     setItemDate('');
     setItemPriority('medium');
     setShowAddForm(true);
   };
+
+  // Format time for display
+  const formatTime = (time?: string) => {
+    if (!time) return null;
+    const [hours, minutes] = time.split(':');
+    const date = new Date();
+    date.setHours(parseInt(hours), parseInt(minutes));
+    return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  };
+
+  // Sort routines by order_index
+  const sortedRoutines = [...routines].sort((a, b) => {
+    const aIndex = a.order_index ?? 999;
+    const bIndex = b.order_index ?? 999;
+    return aIndex - bIndex;
+  });
 
   // Loading skeleton
   if (loading && !initialLoadDone) {
@@ -882,7 +945,7 @@ export default function Planner() {
         ))}
       </div>
 
-      {/* TASKS TAB */}
+      {/* TASKS TAB (unchanged) */}
       {tab === 'tasks' && (
         <div className="space-y-6">
           {showAddForm && (
@@ -968,7 +1031,7 @@ export default function Planner() {
         </div>
       )}
 
-      {/* ROUTINES TAB */}
+      {/* ROUTINES TAB - WITH DRAG AND DROP */}
       {tab === 'routines' && (
         <div className="space-y-4">
           <div className="card p-4">
@@ -1019,9 +1082,18 @@ export default function Planner() {
                   placeholder="Description (e.g., Walk 10k steps)..."
                   className="input-base"
                 />
-                <select value={itemCat} onChange={e => setItemCat(e.target.value)} className="input-base">
-                  {categories.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
-                </select>
+                <div className="grid grid-cols-2 gap-3">
+                  <select value={itemCat} onChange={e => setItemCat(e.target.value)} className="input-base">
+                    {categories.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+                  </select>
+                  <input
+                    type="time"
+                    value={itemTime}
+                    onChange={e => setItemTime(e.target.value)}
+                    placeholder="Time"
+                    className="input-base"
+                  />
+                </div>
                 <div className="flex gap-2">
                   <button onClick={addRoutine} disabled={saving} className="btn-primary py-2 px-4">
                     {saving ? 'Adding...' : 'Add Routine'}
@@ -1036,24 +1108,37 @@ export default function Planner() {
             <EmptyState icon={RotateCcw} text="No routines yet. Create your first daily routine." />
           ) : (
             <div className="space-y-2">
-              {routines.map(routine => (
-                <RoutineRow
+              <p className="text-xs text-[var(--text-muted)] mb-2 flex items-center gap-2">
+                <GripVertical className="w-3 h-3" /> Drag the dots to reorder your routine
+              </p>
+              {sortedRoutines.map((routine, index) => (
+                <div
                   key={routine.id}
-                  routine={routine}
-                  completed={routineLogs.some(
-                    log => log.routine_id === routine.id && log.logged_date === selectedRoutineDate && log.completed
-                  )}
-                  onToggle={toggleRoutine}
-                  onDelete={deleteRoutine}
-                  getCatDot={getCatDot}
-                />
+                  draggable
+                  onDragStart={() => handleDragStart(index)}
+                  onDragOver={(e) => handleDragOver(e, index)}
+                  onDragEnd={handleDragEnd}
+                  className="cursor-move"
+                >
+                  <RoutineRow
+                    routine={routine}
+                    completed={routineLogs.some(
+                      log => log.routine_id === routine.id && log.logged_date === selectedRoutineDate && log.completed
+                    )}
+                    onToggle={toggleRoutine}
+                    onDelete={deleteRoutine}
+                    getCatDot={getCatDot}
+                    showTime={true}
+                    formatTime={formatTime}
+                  />
+                </div>
               ))}
             </div>
           )}
         </div>
       )}
 
-      {/* HABITS TAB */}
+      {/* HABITS TAB (unchanged) */}
       {tab === 'habits' && (
         <div className="space-y-4">
           <div className="card p-4">
@@ -1213,7 +1298,7 @@ export default function Planner() {
         </div>
       )}
 
-      {/* GOALS TAB */}
+      {/* GOALS TAB (unchanged) */}
       {tab === 'goals' && (
         <div className="space-y-4">
           {showGoalForm && (
@@ -1378,7 +1463,7 @@ export default function Planner() {
         </div>
       )}
 
-      {/* HISTORY TAB */}
+      {/* HISTORY TAB (unchanged) */}
       {tab === 'history' && (
         <div>
           <p className="section-header mb-3">Completed Tasks History</p>
@@ -1462,7 +1547,7 @@ export default function Planner() {
   );
 }
 
-// Task Row Component
+// Task Row Component (unchanged)
 function TaskRow({ task, onToggle, onDelete, getCatDot }: {
   task: Task;
   onToggle: (t: Task) => void;
@@ -1514,18 +1599,28 @@ function TaskRow({ task, onToggle, onDelete, getCatDot }: {
   );
 }
 
-// Routine Row Component
-function RoutineRow({ routine, completed, onToggle, onDelete, getCatDot }: {
+// Routine Row Component with drag handle and time display
+function RoutineRow({ routine, completed, onToggle, onDelete, getCatDot, showTime = false, formatTime }: {
   routine: Routine;
   completed: boolean;
   onToggle: (r: Routine) => void;
   onDelete: (id: string) => void;
   getCatDot: (cat: string) => string;
+  showTime?: boolean;
+  formatTime?: (time?: string) => string | null;
 }) {
+  const routineTime = (routine as any).routine_time;
+  const formattedTime = showTime && formatTime && routineTime ? formatTime(routineTime) : null;
+  
   return (
     <div className={`flex items-center gap-4 p-4 rounded-xl border transition-all ${
       completed ? 'border-health/30 bg-health/5 opacity-70' : 'border-[var(--border)] hover:border-[var(--border-hover)] bg-[var(--bg-card)]'
     }`}>
+      {/* Drag Handle */}
+      <div className="cursor-grab active:cursor-grabbing text-[var(--text-muted)]">
+        <GripVertical className="w-4 h-4" />
+      </div>
+      
       <button
         onClick={() => onToggle(routine)}
         className={`w-5 h-5 rounded-full border flex-shrink-0 flex items-center justify-center transition-all ${
@@ -1536,9 +1631,16 @@ function RoutineRow({ routine, completed, onToggle, onDelete, getCatDot }: {
       </button>
 
       <div className="flex-1">
-        <p className={`text-sm font-medium ${completed ? 'line-through text-[var(--text-secondary)]' : 'text-[var(--text-primary)]'}`}>
-          {routine.title}
-        </p>
+        <div className="flex items-center gap-2 flex-wrap">
+          <p className={`text-sm font-medium ${completed ? 'line-through text-[var(--text-secondary)]' : 'text-[var(--text-primary)]'}`}>
+            {routine.title}
+          </p>
+          {formattedTime && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-[var(--bg-secondary)] text-career">
+              {formattedTime}
+            </span>
+          )}
+        </div>
         {routine.description && (
           <p className="text-xs text-[var(--text-secondary)] mt-0.5">{routine.description}</p>
         )}

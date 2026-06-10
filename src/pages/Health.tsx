@@ -1,7 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { 
   Plus, TrendingUp, Droplets, Moon, Footprints, Dumbbell, Scale, 
-  Trash2, Camera, Target, Heart, Calendar, RefreshCw
+  Trash2, Camera, Target, Heart, Calendar, RefreshCw, X, Upload,
+  ChevronLeft, ChevronRight, Grid3x3, Zap, Activity
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
@@ -31,12 +32,27 @@ export default function Health() {
   const { user } = useAuth();
   const [profile, setProfile] = useState<HealthProfile | null>(null);
   const [logs, setLogs] = useState<HealthLog[]>([]);
+  const [photos, setPhotos] = useState<any[]>([]);
   const [showLogForm, setShowLogForm] = useState(false);
   const [showProfileForm, setShowProfileForm] = useState(false);
   const [showPhotoModal, setShowPhotoModal] = useState(false);
+  const [showPhotoViewer, setShowPhotoViewer] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingPhotos, setLoadingPhotos] = useState(false);
   const [saving, setSaving] = useState(false);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [selectedPhotoType, setSelectedPhotoType] = useState<'front' | 'side' | 'back'>('front');
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [galleryView, setGalleryView] = useState<'grid' | 'timeline'>('grid');
+  const [showTip, setShowTip] = useState(true);
+  
+  const profileFormRef = useRef<HTMLDivElement>(null);
+  const logFormRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const today = new Date().toISOString().split('T')[0];
   const [selectedLogDate, setSelectedLogDate] = useState(today);
@@ -62,11 +78,96 @@ export default function Health() {
 
   const loadingRef = useRef(false);
 
+  // Fetch photos from database
+  const fetchPhotos = useCallback(async () => {
+    if (!user) return;
+    
+    setLoadingPhotos(true);
+    try {
+      const { data, error } = await supabase
+        .from('health_photos')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+      setPhotos(data || []);
+    } catch (err) {
+      console.error('Error fetching photos:', err);
+    } finally {
+      setLoadingPhotos(false);
+    }
+  }, [user]);
+
+  // Delete photo function
+  const deletePhoto = async (photo: any) => {
+    if (!confirm('Delete this photo? This action cannot be undone.')) return;
+    
+    try {
+      const urlParts = photo.photo_url.split('/');
+      const fileName = urlParts[urlParts.length - 1];
+      
+      const { error: storageError } = await supabase.storage
+        .from('health-photos')
+        .remove([fileName]);
+      
+      if (storageError) console.error('Storage delete error:', storageError);
+      
+      const { error: dbError } = await supabase
+        .from('health_photos')
+        .delete()
+        .eq('id', photo.id);
+      
+      if (dbError) throw dbError;
+      
+      await fetchPhotos();
+      alert('Photo deleted successfully!');
+      
+      if (showPhotoViewer === photo.photo_url) {
+        setShowPhotoViewer(null);
+      }
+    } catch (err: any) {
+      console.error('Delete error:', err);
+      alert(`Failed to delete photo: ${err.message}`);
+    }
+  };
+
+  // Group photos by month for timeline view
+  const groupPhotosByMonth = () => {
+    const groups: { [key: string]: any[] } = {};
+    photos.forEach(photo => {
+      const date = new Date(photo.created_at);
+      const monthYear = date.toLocaleDateString('en', { month: 'long', year: 'numeric' });
+      if (!groups[monthYear]) {
+        groups[monthYear] = [];
+      }
+      groups[monthYear].push(photo);
+    });
+    return groups;
+  };
+
+  const photoGroups = groupPhotosByMonth();
+
+  // Refresh all data
+  const refreshAllData = async () => {
+    setRefreshing(true);
+    try {
+      healthDataCache = null;
+      await Promise.all([
+        loadHealthData(true),
+        fetchPhotos()
+      ]);
+    } catch (err) {
+      console.error('Refresh error:', err);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   // Load health data with caching
   const loadHealthData = useCallback(async (forceRefresh = false) => {
     if (!user) return;
     
-    // Check cache
     if (!forceRefresh && healthDataCache && (Date.now() - healthDataCache.timestamp) < CACHE_DURATION) {
       console.log('Using cached health data');
       setProfile(healthDataCache.profile);
@@ -81,7 +182,6 @@ export default function Health() {
     
     setLoading(true);
     try {
-      // Fetch profile and logs in parallel
       const [profileResult, logsResult] = await Promise.all([
         supabase.from('health_profile').select('*').eq('id', user.id).maybeSingle(),
         supabase.from('health_logs').select('*').eq('user_id', user.id).order('log_date', { ascending: false }).limit(50)
@@ -106,7 +206,6 @@ export default function Health() {
       const logsData = (logsResult.data || []) as HealthLog[];
       setLogs(logsData);
       
-      // Update cache
       healthDataCache = {
         profile: profileData,
         logs: logsData,
@@ -125,8 +224,15 @@ export default function Health() {
   useEffect(() => {
     if (user && !initialLoadDone) {
       loadHealthData();
+      fetchPhotos();
     }
-  }, [user, loadHealthData, initialLoadDone]);
+  }, [user, loadHealthData, fetchPhotos, initialLoadDone]);
+
+  const scrollToSection = (ref: React.RefObject<HTMLDivElement>) => {
+    if (ref.current) {
+      ref.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
 
   const saveProfile = async () => {
     if (!user) return;
@@ -157,6 +263,100 @@ export default function Health() {
     } finally {
       setSaving(false);
     }
+  };
+
+  // Handle file selection with preview
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Photo size should be less than 5MB');
+      return;
+    }
+    
+    if (!file.type.startsWith('image/')) {
+      alert('Please upload an image file');
+      return;
+    }
+    
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    setSelectedFile(file);
+  };
+
+  // Handle photo upload with retry logic
+  const confirmUpload = async () => {
+    if (!selectedFile || !user) return;
+    
+    setUploadingPhoto(true);
+    setUploadProgress(0);
+    
+    const interval = setInterval(() => {
+      setUploadProgress(prev => Math.min(prev + 20, 90));
+    }, 200);
+    
+    // Retry logic
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const fileExt = selectedFile.name.split('.').pop();
+        const timestamp = Date.now();
+        const fileName = `${user.id}_${timestamp}_${selectedPhotoType}.${fileExt}`;
+        
+        console.log(`Upload attempt ${attempt}:`, fileName);
+        
+        const { error: uploadError } = await supabase.storage
+          .from('health-photos')
+          .upload(fileName, selectedFile, {
+            cacheControl: '3600',
+            upsert: true
+          });
+        
+        if (uploadError) throw uploadError;
+        
+        setUploadProgress(100);
+        
+        const { data: { publicUrl } } = supabase.storage
+          .from('health-photos')
+          .getPublicUrl(fileName);
+        
+        const { error: dbError } = await supabase
+          .from('health_photos')
+          .insert({
+            user_id: user.id,
+            photo_url: publicUrl,
+            photo_date: new Date().toISOString().split('T')[0],
+            photo_type: selectedPhotoType
+          });
+        
+        if (dbError) throw dbError;
+        
+        alert(`${selectedPhotoType.charAt(0).toUpperCase() + selectedPhotoType.slice(1)} photo uploaded successfully!`);
+        await fetchPhotos();
+        
+        setShowPhotoModal(false);
+        setPreviewUrl(null);
+        setSelectedFile(null);
+        clearInterval(interval);
+        setUploadingPhoto(false);
+        return;
+        
+      } catch (err: any) {
+        console.error(`Attempt ${attempt} failed:`, err);
+        
+        if (attempt === 3) {
+          alert(`Failed to upload after 3 attempts: ${err.message}`);
+          clearInterval(interval);
+          setUploadingPhoto(false);
+          setUploadProgress(0);
+        } else {
+          await new Promise(resolve => setTimeout(resolve, attempt * 500));
+        }
+      }
+    }
+    
+    setUploadingPhoto(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const addLog = async () => {
@@ -314,13 +514,48 @@ export default function Health() {
 
   const healthScore = calculateHealthScore(logs, profile, waterGoal, stepsGoal);
 
-  // Loading skeleton
+  // Health tips based on user data
+  const getHealthTip = () => {
+    if (workoutStreak === 0) return "🔥 Start a workout streak today! Just 15 minutes.";
+    if (waterAvg < waterGoal * 0.5) return "💧 You're falling behind on water. Drink up!";
+    if (avgSteps < 5000) return "👟 Take the stairs today. Small steps add up!";
+    if (avgSleep < 6) return "😴 Early to bed, early to rise. Prioritize sleep!";
+    if (healthScore >= 70) return "🌟 Great work! Consistency is key to success.";
+    return "💪 Every small step counts toward your goal!";
+  };
+
+  const currentTip = getHealthTip();
+
+  const handleShowProfileForm = () => {
+    setShowProfileForm(true);
+    setShowLogForm(false);
+    setTimeout(() => scrollToSection(profileFormRef), 100);
+  };
+
+  const handleShowLogForm = () => {
+    setShowLogForm(true);
+    setShowProfileForm(false);
+    setTimeout(() => scrollToSection(logFormRef), 100);
+  };
+
+  // Format date for display
+  const formatPhotoDate = (dateStr: string) => {
+    const date = new Date(dateStr);
+    const now = new Date();
+    const isThisYear = date.getFullYear() === now.getFullYear();
+    
+    if (isThisYear) {
+      return date.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+    }
+    return date.toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' });
+  };
+
   if (loading && !initialLoadDone) {
     return (
-      <div className="p-6 md:p-8 max-w-5xl mx-auto">
+      <div className="p-4 md:p-6 lg:p-8 max-w-5xl mx-auto">
         <div className="animate-pulse space-y-4">
           <div className="h-8 w-32 bg-[var(--bg-secondary)] rounded-xl" />
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
             {[1,2,3,4,5].map(i => (
               <div key={i} className="h-24 bg-[var(--bg-card)] rounded-2xl border border-[var(--border)]" />
             ))}
@@ -333,11 +568,11 @@ export default function Health() {
   }
 
   return (
-    <div className="p-6 md:p-8 max-w-5xl mx-auto animate-fade-in">
+    <div className="p-4 md:p-6 lg:p-8 max-w-5xl mx-auto animate-fade-in pb-20 md:pb-8">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
-          <h1 className="page-title">Health</h1>
+          <h1 className="page-title text-2xl md:text-3xl">Health</h1>
           {profile?.primary_goal && (
             <p className="text-sm text-[var(--text-secondary)] mt-1 flex items-center gap-1">
               {goalOptions.find(g => g.id === profile.primary_goal)?.icon} 
@@ -346,17 +581,23 @@ export default function Health() {
           )}
         </div>
         <div className="flex gap-2">
-          <button onClick={() => loadHealthData(true)} className="btn-secondary py-2 px-3 text-sm" title="Refresh">
-            <RefreshCw className="w-4 h-4" />
+          <button 
+            onClick={refreshAllData} 
+            disabled={refreshing}
+            className="btn-secondary py-2 px-3 text-sm transition-transform duration-300"
+          >
+            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
           </button>
-          <button onClick={() => setShowPhotoModal(true)} className="btn-secondary py-2 px-4 text-sm flex items-center gap-2">
-            <Camera className="w-4 h-4" /> Photos
+          <button onClick={() => setShowPhotoModal(true)} className="btn-secondary py-2 px-3 text-sm flex items-center gap-1">
+            <Camera className="w-4 h-4" /> 
+            <span className="hidden sm:inline">Photos</span>
           </button>
-          <button onClick={() => setShowProfileForm(!showProfileForm)} className="btn-secondary py-2 px-4 text-sm">
+          <button onClick={handleShowProfileForm} className="btn-secondary py-2 px-3 text-sm">
             Settings
           </button>
-          <button onClick={() => setShowLogForm(!showLogForm)} className="btn-primary flex items-center gap-2 py-2 px-4">
-            <Plus className="w-4 h-4" />Log Today
+          <button onClick={handleShowLogForm} className="btn-primary flex items-center gap-1 py-2 px-3 text-sm">
+            <Plus className="w-4 h-4" />
+            <span>Log</span>
           </button>
         </div>
       </div>
@@ -365,8 +606,8 @@ export default function Health() {
       <div className="card p-5 mb-6 bg-gradient-to-r from-health/5 to-transparent">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-16 h-16 rounded-full bg-health/10 flex items-center justify-center">
-              <span className="text-2xl font-bold text-health">{healthScore}</span>
+            <div className="w-14 h-14 md:w-16 md:h-16 rounded-full bg-health/10 flex items-center justify-center">
+              <span className="text-xl md:text-2xl font-bold text-health">{healthScore}</span>
             </div>
             <div>
               <p className="text-xs text-[var(--text-secondary)]">Health Score</p>
@@ -383,224 +624,234 @@ export default function Health() {
       </div>
 
       {/* Stats Row */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 mb-6">
         <StatCard icon={Scale} label="Weight" value={latestWeight ? `${latestWeight} kg` : '—'} color="text-health" />
-        <StatCard icon={Footprints} label="Daily Steps" value={avgSteps > 0 ? avgSteps.toLocaleString() : '—'} subValue={`Goal: ${stepsGoal.toLocaleString()}`} color="text-knowledge" />
+        <StatCard icon={Footprints} label="Steps" value={avgSteps > 0 ? avgSteps.toLocaleString() : '—'} subValue={`Goal: ${stepsGoal.toLocaleString()}`} color="text-knowledge" />
         <StatCard icon={Droplets} label="Water" value={waterAvg > 0 ? `${waterAvg} ml` : '—'} subValue={`Goal: ${waterGoal} ml`} color="text-cyan-400" />
-        <StatCard icon={Moon} label="Sleep" value={avgSleep > 0 ? `${avgSleep.toFixed(1)}h` : '—'} subValue="7-9h recommended" color="text-career" />
-        <StatCard icon={Dumbbell} label="Workouts" value={last7DaysLogs.filter(l => l.workout_done).length.toString()} subValue="in last 7 days" color="text-wealth" />
+        <StatCard icon={Moon} label="Sleep" value={avgSleep > 0 ? `${avgSleep.toFixed(1)}h` : '—'} subValue="7-9h goal" color="text-career" />
+        <StatCard icon={Dumbbell} label="Workouts" value={last7DaysLogs.filter(l => l.workout_done).length.toString()} subValue="in 7 days" color="text-wealth" />
       </div>
 
-      {/* BMI Card */}
-      {bmi && (
-        <div className="card p-4 mb-6 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Heart className={`w-5 h-5 ${
-              bmiCategory === 'Normal' ? 'text-green-400' : 
-              bmiCategory === 'Underweight' ? 'text-yellow-400' : 'text-orange-400'
-            }`} />
-            <div>
-              <p className="text-sm font-medium text-[var(--text-primary)]">BMI: {bmi}</p>
-              <p className="text-xs text-[var(--text-secondary)]">{bmiCategory}</p>
+      {/* BMI & Goal Summary */}
+      <div className="grid grid-cols-2 gap-3 mb-6">
+        {bmi && (
+          <div className="card p-4">
+            <div className="flex items-center gap-3">
+              <Heart className={`w-5 h-5 ${
+                bmiCategory === 'Normal' ? 'text-green-400' : 
+                bmiCategory === 'Underweight' ? 'text-yellow-400' : 'text-orange-400'
+              }`} />
+              <div>
+                <p className="text-xs text-[var(--text-secondary)]">BMI</p>
+                <p className="text-sm font-medium text-[var(--text-primary)]">{bmi} · {bmiCategory}</p>
+              </div>
             </div>
           </div>
-          <div className="w-32 h-1 bg-[var(--border)] rounded-full overflow-hidden">
-            <div className="h-full bg-health rounded-full" style={{ width: `${(parseFloat(bmi) / 40) * 100}%` }} />
+        )}
+        {profile?.goal_weight && (
+          <div className="card p-4">
+            <div className="flex items-center gap-3">
+              <Target className="w-4 h-4 text-health" />
+              <div className="flex-1">
+                <p className="text-xs text-[var(--text-secondary)]">Weight Goal</p>
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium text-[var(--text-primary)]">
+                    {latestWeight || profile.current_weight || '—'} / {profile.goal_weight} kg
+                  </p>
+                  <span className="text-xs text-health">
+                    {latestWeight && profile.goal_weight ? Math.round((latestWeight / profile.goal_weight) * 100) : 0}%
+                  </span>
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* Goal info */}
-      {profile && profile.goal_weight && (
-        <div className="card p-4 mb-6">
-          <div className="flex items-center gap-3 mb-3">
-            <Target className="w-4 h-4 text-health" />
-            <p className="text-sm font-medium text-[var(--text-primary)]">Weight Goal Progress</p>
+      {/* Motivational Tip */}
+      {showTip && (
+        <div className="card p-4 mb-6 bg-health/5 border-health/20">
+          <div className="flex items-center gap-3">
+            <Zap className="w-4 h-4 text-health flex-shrink-0" />
+            <p className="text-sm text-[var(--text-primary)] flex-1">{currentTip}</p>
+            <button onClick={() => setShowTip(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]">
+              <X className="w-4 h-4" />
+            </button>
           </div>
-          <div className="flex justify-between text-sm mb-2">
-            <span className="text-[var(--text-secondary)]">Current: {latestWeight || profile.current_weight || '—'} kg</span>
-            <span className="text-[var(--text-secondary)]">Target: {profile.goal_weight} kg</span>
-          </div>
-          <div className="progress-bar mb-2">
-            <div className="progress-fill bg-health" style={{ 
-              width: `${Math.min(100, Math.max(0, ((profile.current_weight || latestWeight || 0) - profile.goal_weight) / (profile.current_weight || 1) * 100))}%` 
-            }} />
-          </div>
-          {profile.target_date && (
-            <p className="text-xs text-[var(--text-secondary)] flex items-center gap-1">
-              <Calendar className="w-3 h-3" /> Target date: {new Date(profile.target_date).toLocaleDateString()}
-            </p>
-          )}
         </div>
       )}
 
       {/* Profile Settings Form */}
-      {showProfileForm && (
-        <div className="card p-5 mb-6 animate-slide-up">
-          <h3 className="font-semibold text-sm mb-4 text-[var(--text-primary)]">Health Settings</h3>
-          <div className="space-y-4">
-            <div>
-              <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Primary Goal</label>
-              <div className="grid grid-cols-2 gap-2">
-                {goalOptions.map(g => (
-                  <button 
-                    key={g.id} 
-                    onClick={() => setPrimaryGoal(g.id)} 
-                    className={`py-2 px-3 rounded-xl text-sm border transition-all flex items-center gap-2 justify-center ${
-                      primaryGoal === g.id ? 'border-health bg-health/10 text-health' : 'border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--border-hover)]'
-                    }`}
-                  >
-                    <span>{g.icon}</span> {g.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            
-            <div className="grid grid-cols-2 gap-3">
+      <div ref={profileFormRef}>
+        {showProfileForm && (
+          <div className="card p-5 mb-6 animate-slide-up">
+            <h3 className="font-semibold text-sm mb-4 text-[var(--text-primary)]">Health Settings</h3>
+            <div className="space-y-4">
               <div>
-                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Current Weight (kg)</label>
-                <input type="number" value={currentWeight} onChange={e => setCurrentWeight(e.target.value)} placeholder="75" className="input-base" />
+                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Primary Goal</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {goalOptions.map(g => (
+                    <button 
+                      key={g.id} 
+                      onClick={() => setPrimaryGoal(g.id)} 
+                      className={`py-2 px-3 rounded-xl text-sm border transition-all flex items-center gap-2 justify-center ${
+                        primaryGoal === g.id ? 'border-health bg-health/10 text-health' : 'border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--border-hover)]'
+                      }`}
+                    >
+                      <span>{g.icon}</span> {g.label}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div>
-                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Goal Weight (kg)</label>
-                <input type="number" value={goalWeight} onChange={e => setGoalWeight(e.target.value)} placeholder="65" className="input-base" />
-              </div>
-              <div>
-                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Height (cm)</label>
-                <input type="number" value={height} onChange={e => setHeight(e.target.value)} placeholder="175" className="input-base" />
-              </div>
-              <div>
-                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Target Date</label>
-                <input type="date" value={targetDate} onChange={e => setTargetDate(e.target.value)} className="input-base" />
-              </div>
-            </div>
-            
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Daily Water Goal (ml)</label>
-                <input type="number" value={waterGoal} onChange={e => setWaterGoal(parseInt(e.target.value))} placeholder="2500" className="input-base" />
-              </div>
-              <div>
-                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Daily Steps Goal</label>
-                <input type="number" value={stepsGoal} onChange={e => setStepsGoal(parseInt(e.target.value))} placeholder="8000" className="input-base" />
-              </div>
-            </div>
-            
-            <div className="flex gap-2">
-              <button onClick={saveProfile} disabled={saving} className="btn-primary py-2 px-4">
-                {saving ? 'Saving...' : 'Save'}
-              </button>
-              <button onClick={() => setShowProfileForm(false)} className="btn-ghost">Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Daily Log Form */}
-      {showLogForm && (
-        <div className="card p-5 mb-6 animate-slide-up">
-          <h3 className="font-semibold text-sm mb-4 text-[var(--text-primary)]">
-            Log Health — {selectedLogDate}
-          </h3>
-
-          <div className="mb-3">
-            <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Select Date</label>
-            <input type="date" value={selectedLogDate} onChange={(e) => setSelectedLogDate(e.target.value)} className="input-base" />
-          </div>
-          
-          <div className="grid grid-cols-2 gap-3 mb-3">
-            <div>
-              <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Weight (kg)</label>
-              <input type="number" step="0.1" value={weight} onChange={e => setWeight(e.target.value)} placeholder="e.g. 72.5" className="input-base" />
-            </div>
-            <div>
-              <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Steps</label>
-              <input type="number" value={steps} onChange={e => setSteps(e.target.value)} placeholder="e.g. 8000" className="input-base" />
-            </div>
-            <div>
-              <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Water (ml)</label>
-              <input type="number" value={water} onChange={e => setWater(e.target.value)} placeholder="e.g. 2500" className="input-base" />
-            </div>
-            <div>
-              <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Sleep (hours)</label>
-              <input type="number" step="0.5" value={sleep} onChange={e => setSleep(e.target.value)} placeholder="e.g. 7.5" className="input-base" />
-            </div>
-            <div>
-              <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Calories Burned</label>
-              <input type="number" value={calories} onChange={e => setCalories(e.target.value)} placeholder="e.g. 500" className="input-base" />
-            </div>
-            <div>
-              <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Mood (1-5)</label>
-              <div className="flex gap-1">
-                {[1, 2, 3, 4, 5].map(m => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => setMood(m)}
-                    className={`flex-1 py-2 rounded-lg text-sm transition-all ${
-                      mood === m ? 'bg-health text-white' : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
-                    }`}
-                  >
-                    {m === 1 ? '😔' : m === 2 ? '😐' : m === 3 ? '😊' : m === 4 ? '😁' : '🤩'}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-          
-          <div className="flex items-center gap-3 mb-3">
-            <button 
-              type="button"
-              onClick={() => setWorkoutDone(!workoutDone)} 
-              className={`w-5 h-5 rounded-md border flex items-center justify-center transition-all ${workoutDone ? 'bg-health border-health' : 'border-[var(--border)]'}`}
-            >
-              {workoutDone && <svg className="w-3 h-3 text-white" viewBox="0 0 10 10" fill="none"><path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>}
-            </button>
-            <span className="text-sm text-[var(--text-primary)]">Worked out today</span>
-          </div>
-          
-          {workoutDone && (
-            <div className="space-y-3 mb-3">
+              
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Workout Type</label>
-                  <div className="flex flex-wrap gap-1">
-                    {workoutTypes.map(wt => (
-                      <button
-                        key={wt.id}
-                        type="button"
-                        onClick={() => setWorkoutType(wt.id)}
-                        className={`py-1.5 px-2 rounded-lg text-xs transition-all ${
-                          workoutType === wt.id ? 'bg-health/20 border border-health text-health' : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
-                        }`}
-                      >
-                        {wt.icon} {wt.label}
-                      </button>
-                    ))}
-                  </div>
+                  <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Current Weight (kg)</label>
+                  <input type="number" value={currentWeight} onChange={e => setCurrentWeight(e.target.value)} placeholder="75" className="input-base" />
                 </div>
                 <div>
-                  <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Duration (minutes)</label>
-                  <input type="number" value={workoutDuration} onChange={e => setWorkoutDuration(e.target.value)} placeholder="45" className="input-base" />
+                  <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Goal Weight (kg)</label>
+                  <input type="number" value={goalWeight} onChange={e => setGoalWeight(e.target.value)} placeholder="65" className="input-base" />
+                </div>
+                <div>
+                  <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Height (cm)</label>
+                  <input type="number" value={height} onChange={e => setHeight(e.target.value)} placeholder="175" className="input-base" />
+                </div>
+                <div>
+                  <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Target Date</label>
+                  <input type="date" value={targetDate} onChange={e => setTargetDate(e.target.value)} className="input-base" />
                 </div>
               </div>
-              <input 
-                value={workoutNotes} 
-                onChange={e => setWorkoutNotes(e.target.value)} 
-                placeholder="Workout notes (exercises, weights, etc)..." 
-                className="input-base" 
-              />
+              
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Daily Water Goal (ml)</label>
+                  <input type="number" value={waterGoal} onChange={e => setWaterGoal(parseInt(e.target.value))} placeholder="2500" className="input-base" />
+                </div>
+                <div>
+                  <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Daily Steps Goal</label>
+                  <input type="number" value={stepsGoal} onChange={e => setStepsGoal(parseInt(e.target.value))} placeholder="8000" className="input-base" />
+                </div>
+              </div>
+              
+              <div className="flex gap-2">
+                <button onClick={saveProfile} disabled={saving} className="btn-primary py-2 px-4">
+                  {saving ? 'Saving...' : 'Save'}
+                </button>
+                <button onClick={() => setShowProfileForm(false)} className="btn-ghost">Cancel</button>
+              </div>
             </div>
-          )}
-          
-          <div className="flex gap-2">
-            <button onClick={addLog} disabled={saving} className="btn-primary py-2 px-4">
-              {saving ? 'Saving...' : (selectedLog ? 'Update Log' : 'Save Log')}
-            </button>
-            <button onClick={resetForm} className="btn-ghost">Cancel</button>
           </div>
-        </div>
-      )}
+        )}
+      </div>
+
+      {/* Daily Log Form */}
+      <div ref={logFormRef}>
+        {showLogForm && (
+          <div className="card p-5 mb-6 animate-slide-up">
+            <h3 className="font-semibold text-sm mb-4 text-[var(--text-primary)]">
+              Log Health — {selectedLogDate}
+            </h3>
+
+            <div className="mb-3">
+              <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Select Date</label>
+              <input type="date" value={selectedLogDate} onChange={(e) => setSelectedLogDate(e.target.value)} className="input-base" />
+            </div>
+            
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Weight (kg)</label>
+                <input type="number" step="0.1" value={weight} onChange={e => setWeight(e.target.value)} placeholder="e.g. 72.5" className="input-base" />
+              </div>
+              <div>
+                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Steps</label>
+                <input type="number" value={steps} onChange={e => setSteps(e.target.value)} placeholder="e.g. 8000" className="input-base" />
+              </div>
+              <div>
+                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Water (ml)</label>
+                <input type="number" value={water} onChange={e => setWater(e.target.value)} placeholder="e.g. 2500" className="input-base" />
+              </div>
+              <div>
+                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Sleep (hours)</label>
+                <input type="number" step="0.5" value={sleep} onChange={e => setSleep(e.target.value)} placeholder="e.g. 7.5" className="input-base" />
+              </div>
+              <div>
+                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Calories Burned</label>
+                <input type="number" value={calories} onChange={e => setCalories(e.target.value)} placeholder="e.g. 500" className="input-base" />
+              </div>
+              <div>
+                <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Mood (1-5)</label>
+                <div className="flex gap-1">
+                  {[1, 2, 3, 4, 5].map(m => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setMood(m)}
+                      className={`flex-1 py-2 rounded-lg text-sm transition-all ${
+                        mood === m ? 'bg-health text-white' : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
+                      }`}
+                    >
+                      {m === 1 ? '😔' : m === 2 ? '😐' : m === 3 ? '😊' : m === 4 ? '😁' : '🤩'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            
+            <div className="flex items-center gap-3 mb-3">
+              <button 
+                type="button"
+                onClick={() => setWorkoutDone(!workoutDone)} 
+                className={`w-5 h-5 rounded-md border flex items-center justify-center transition-all ${workoutDone ? 'bg-health border-health' : 'border-[var(--border)]'}`}
+              >
+                {workoutDone && <CheckIcon />}
+              </button>
+              <span className="text-sm text-[var(--text-primary)]">Worked out today</span>
+            </div>
+            
+            {workoutDone && (
+              <div className="space-y-3 mb-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Workout Type</label>
+                    <div className="flex flex-wrap gap-1">
+                      {workoutTypes.map(wt => (
+                        <button
+                          key={wt.id}
+                          type="button"
+                          onClick={() => setWorkoutType(wt.id)}
+                          className={`py-1.5 px-2 rounded-lg text-xs transition-all ${
+                            workoutType === wt.id ? 'bg-health/20 border border-health text-health' : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
+                          }`}
+                        >
+                          {wt.icon} {wt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-[var(--text-secondary)] mb-1.5 block">Duration (minutes)</label>
+                    <input type="number" value={workoutDuration} onChange={e => setWorkoutDuration(e.target.value)} placeholder="45" className="input-base" />
+                  </div>
+                </div>
+                <input 
+                  value={workoutNotes} 
+                  onChange={e => setWorkoutNotes(e.target.value)} 
+                  placeholder="Workout notes (exercises, weights, etc)..." 
+                  className="input-base" 
+                />
+              </div>
+            )}
+            
+            <div className="flex gap-2">
+              <button onClick={addLog} disabled={saving} className="btn-primary py-2 px-4">
+                {saving ? 'Saving...' : (selectedLog ? 'Update Log' : 'Save Log')}
+              </button>
+              <button onClick={resetForm} className="btn-ghost">Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Log History */}
       <div>
@@ -669,19 +920,333 @@ export default function Health() {
         )}
       </div>
 
-      {/* Photo Modal */}
+      {/* Progress Photos Gallery - WITH DATE DISPLAY */}
+      <div className="mt-8">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Camera className="w-4 h-4 text-health" />
+            <p className="section-header">Progress Gallery</p>
+            <span className="text-xs text-[var(--text-muted)]">({photos.length} photos)</span>
+          </div>
+          <div className="flex gap-2">
+            <button 
+              onClick={() => setGalleryView('grid')}
+              className={`p-1.5 rounded-lg transition-colors ${galleryView === 'grid' ? 'bg-health/20 text-health' : 'text-[var(--text-secondary)]'}`}
+              title="Grid view"
+            >
+              <Grid3x3 className="w-4 h-4" />
+            </button>
+            <button 
+              onClick={() => setGalleryView('timeline')}
+              className={`p-1.5 rounded-lg transition-colors ${galleryView === 'timeline' ? 'bg-health/20 text-health' : 'text-[var(--text-secondary)]'}`}
+              title="Timeline view"
+            >
+              <Calendar className="w-4 h-4" />
+            </button>
+            <button 
+              onClick={() => setShowPhotoModal(true)} 
+              className="text-xs text-health hover:underline flex items-center gap-1"
+            >
+              <Plus className="w-3 h-3" /> Add
+            </button>
+          </div>
+        </div>
+        
+        {loadingPhotos ? (
+          <div className="grid grid-cols-3 gap-2">
+            {[1,2,3].map(i => (
+              <div key={i} className="aspect-square bg-[var(--bg-secondary)] rounded-xl animate-pulse" />
+            ))}
+          </div>
+        ) : photos.length === 0 ? (
+          <div className="text-center py-12 card">
+            <Camera className="w-12 h-12 text-[var(--text-muted)] mx-auto mb-3" />
+            <p className="text-sm text-[var(--text-secondary)]">No progress photos yet</p>
+            <p className="text-xs text-[var(--text-muted)] mt-1">Take front, side, and back photos to track your transformation</p>
+            <button 
+              onClick={() => setShowPhotoModal(true)} 
+              className="mt-4 btn-secondary text-sm py-2 px-4"
+            >
+              <Plus className="w-4 h-4 inline mr-1" /> Take First Photo
+            </button>
+          </div>
+        ) : galleryView === 'timeline' ? (
+          // Timeline View - Organized by month with dates
+          <div className="space-y-6">
+            {Object.entries(photoGroups).map(([monthYear, monthPhotos]) => (
+              <div key={monthYear}>
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="w-1 h-6 rounded-full bg-health" />
+                  <h4 className="text-sm font-semibold text-[var(--text-primary)]">{monthYear}</h4>
+                  <span className="text-xs text-[var(--text-muted)]">{monthPhotos.length} photos</span>
+                </div>
+                <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
+                  {monthPhotos.map((photo) => (
+                    <div 
+                      key={photo.id} 
+                      className="relative aspect-square rounded-xl overflow-hidden group border border-[var(--border)] bg-[var(--bg-secondary)]"
+                    >
+                      <img 
+                        src={photo.photo_url} 
+                        alt={photo.photo_type}
+                        className="w-full h-full object-cover cursor-pointer"
+                        onClick={() => setShowPhotoViewer(photo.photo_url)}
+                      />
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deletePhoto(photo);
+                        }}
+                        className="absolute top-1 right-1 p-1 rounded-full bg-red-500/80 hover:bg-red-600 text-white opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-1">
+                        <span className="text-[10px] text-white capitalize">{photo.photo_type}</span>
+                      </div>
+                      {/* DATE DISPLAY on photo */}
+                      <div className="absolute top-1 left-1">
+                        <span className="text-[9px] px-1 py-0.5 rounded bg-black/60 text-white">
+                          {formatPhotoDate(photo.created_at)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          // Grid View - With date display on each photo
+          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
+            {photos.map((photo) => (
+              <div 
+                key={photo.id} 
+                className="relative aspect-square rounded-xl overflow-hidden group border border-[var(--border)] bg-[var(--bg-secondary)]"
+              >
+                <img 
+                  src={photo.photo_url} 
+                  alt={photo.photo_type}
+                  className="w-full h-full object-cover cursor-pointer"
+                  onClick={() => setShowPhotoViewer(photo.photo_url)}
+                />
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deletePhoto(photo);
+                  }}
+                  className="absolute top-1 right-1 p-1 rounded-full bg-red-500/80 hover:bg-red-600 text-white opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-1">
+                  <span className="text-[10px] text-white capitalize">{photo.photo_type}</span>
+                </div>
+                {/* DATE DISPLAY on photo - Top Left */}
+                <div className="absolute top-1 left-1">
+                  <span className="text-[9px] px-1 py-0.5 rounded bg-black/60 text-white font-medium">
+                    {formatPhotoDate(photo.created_at)}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Photo Upload Modal */}
       {showPhotoModal && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4" onClick={() => setShowPhotoModal(false)}>
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4" onClick={() => {
+          setShowPhotoModal(false);
+          setPreviewUrl(null);
+          setSelectedFile(null);
+        }}>
           <div className="card max-w-md w-full p-6" onClick={e => e.stopPropagation()}>
-            <h3 className="font-medium mb-4 text-[var(--text-primary)]">Progress Photos</h3>
-            <p className="text-sm text-[var(--text-secondary)] mb-4">Progress photos help you see visual changes over time.</p>
-            <div className="border-2 border-dashed border-[var(--border)] rounded-xl p-8 text-center mb-4">
-              <Camera className="w-8 h-8 text-[var(--text-muted)] mx-auto mb-2" />
-              <p className="text-xs text-[var(--text-secondary)]">Upload front/side/back photos</p>
-              <input type="file" accept="image/*" className="hidden" />
-              <button className="btn-secondary text-sm mt-3">Take Photo</button>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-medium text-[var(--text-primary)]">Progress Photos</h3>
+              <button onClick={() => {
+                setShowPhotoModal(false);
+                setPreviewUrl(null);
+                setSelectedFile(null);
+              }} className="text-[var(--text-secondary)]">
+                <X className="w-5 h-5" />
+              </button>
             </div>
-            <button onClick={() => setShowPhotoModal(false)} className="btn-ghost w-full">Close</button>
+            
+            {previewUrl ? (
+              <div className="mb-4">
+                <img src={previewUrl} alt="Preview" className="w-full rounded-xl" />
+                <div className="flex gap-2 mt-3">
+                  <button 
+                    onClick={confirmUpload}
+                    disabled={uploadingPhoto}
+                    className="btn-primary flex-1"
+                  >
+                    {uploadingPhoto ? 'Uploading...' : 'Confirm Upload'}
+                  </button>
+                  <button 
+                    onClick={() => {
+                      setPreviewUrl(null);
+                      setSelectedFile(null);
+                      if (fileInputRef.current) fileInputRef.current.value = '';
+                    }}
+                    className="btn-secondary flex-1"
+                  >
+                    Retake
+                  </button>
+                </div>
+                {uploadingPhoto && (
+                  <div className="mt-3">
+                    <div className="progress-bar">
+                      <div className="progress-fill bg-health" style={{ width: `${uploadProgress}%` }} />
+                    </div>
+                    <p className="text-xs text-center text-[var(--text-secondary)] mt-1">{uploadProgress}%</p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <>
+                <p className="text-sm text-[var(--text-secondary)] mb-4">
+                  Track your transformation with progress photos
+                </p>
+                
+                {/* Photo Type Selection */}
+                <div className="grid grid-cols-3 gap-2 mb-4">
+                  {(['front', 'side', 'back'] as const).map(type => (
+                    <button
+                      key={type}
+                      onClick={() => setSelectedPhotoType(type)}
+                      className={`py-2 rounded-lg text-sm capitalize transition-all ${
+                        selectedPhotoType === type 
+                          ? 'bg-health text-white' 
+                          : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
+                      }`}
+                    >
+                      {type}
+                    </button>
+                  ))}
+                </div>
+                
+                {/* Upload Area */}
+                <div 
+                  className="border-2 border-dashed border-[var(--border)] rounded-xl p-6 text-center cursor-pointer hover:border-health/50 transition-colors"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Camera className="w-10 h-10 text-[var(--text-muted)] mx-auto mb-3" />
+                  <p className="text-sm text-[var(--text-primary)] mb-1">Tap to take photo</p>
+                  <p className="text-xs text-[var(--text-secondary)]">{selectedPhotoType} view</p>
+                  <p className="text-xs text-[var(--text-muted)] mt-2">Max size: 5MB</p>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={handleFileSelect}
+                    className="hidden"
+                  />
+                </div>
+              </>
+            )}
+            
+            <button 
+              onClick={() => {
+                setShowPhotoModal(false);
+                setPreviewUrl(null);
+                setSelectedFile(null);
+              }} 
+              className="btn-ghost w-full mt-4"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Full Screen Photo Viewer with Date */}
+      {showPhotoViewer && showPhotoViewer !== 'all' && (
+        <div 
+          className="fixed inset-0 bg-black/95 z-50 flex items-center justify-center"
+          onClick={() => setShowPhotoViewer(null)}
+        >
+          <div className="relative max-w-full max-h-full p-4">
+            <img 
+              src={showPhotoViewer} 
+              alt="Full size" 
+              className="max-w-full max-h-[90vh] object-contain rounded-lg"
+            />
+            <button 
+              onClick={() => setShowPhotoViewer(null)}
+              className="absolute top-4 right-4 w-10 h-10 rounded-full bg-black/50 text-white flex items-center justify-center hover:bg-black/70 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <button
+              onClick={() => {
+                const photo = photos.find(p => p.photo_url === showPhotoViewer);
+                if (photo) deletePhoto(photo);
+              }}
+              className="absolute bottom-4 right-4 px-4 py-2 rounded-lg bg-red-500/80 hover:bg-red-600 text-white text-sm flex items-center gap-2 transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+              Delete
+            </button>
+            <div className="absolute bottom-4 left-0 right-0 text-center pointer-events-none">
+              <p className="text-white/70 text-sm">Tap anywhere to close</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* All Photos Grid Modal */}
+      {showPhotoViewer === 'all' && (
+        <div className="fixed inset-0 bg-black/95 z-50 flex flex-col">
+          <div className="flex items-center justify-between p-4 border-b border-white/10">
+            <h3 className="text-white font-medium flex items-center gap-2">
+              <Camera className="w-4 h-4" /> All Progress Photos ({photos.length})
+            </h3>
+            <button 
+              onClick={() => setShowPhotoViewer(null)}
+              className="w-8 h-8 rounded-full bg-white/10 text-white flex items-center justify-center hover:bg-white/20 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+              {photos.map((photo) => (
+                <div 
+                  key={photo.id} 
+                  className="relative aspect-square rounded-xl overflow-hidden cursor-pointer group border border-white/10 hover:border-health/50 transition-all"
+                  onClick={() => setShowPhotoViewer(photo.photo_url)}
+                >
+                  <img 
+                    src={photo.photo_url} 
+                    alt={photo.photo_type}
+                    className="w-full h-full object-cover"
+                  />
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deletePhoto(photo);
+                    }}
+                    className="absolute top-1 right-1 p-1 rounded-full bg-red-500/80 hover:bg-red-600 text-white opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                  <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+                    <span className="text-xs text-white">Tap to enlarge</span>
+                  </div>
+                  <div className="absolute bottom-1 left-1 right-1 flex justify-between items-center">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-black/60 text-white capitalize">
+                      {photo.photo_type}
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-black/60 text-white">
+                      {formatPhotoDate(photo.created_at)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -689,6 +1254,7 @@ export default function Health() {
   );
 }
 
+// Stat Card Component
 function StatCard({ icon: Icon, label, value, subValue, color }: { icon: React.ElementType; label: string; value: string; subValue?: string; color: string }) {
   return (
     <div className="card p-4">
@@ -697,6 +1263,15 @@ function StatCard({ icon: Icon, label, value, subValue, color }: { icon: React.E
       <p className="text-lg font-bold text-[var(--text-primary)]">{value}</p>
       {subValue && <p className="text-[10px] text-[var(--text-secondary)] mt-1">{subValue}</p>}
     </div>
+  );
+}
+
+// Check Icon Component
+function CheckIcon() {
+  return (
+    <svg className="w-3 h-3 text-white" viewBox="0 0 10 10" fill="none">
+      <path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
   );
 }
 

@@ -28,6 +28,15 @@ const navItems: NavItem[] = [
   { id: 'settings', icon: Settings, label: 'Settings' },
 ];
 
+// Mobile bottom nav items (first 5 + more)
+const mobileNavItems: NavItem[] = [
+  { id: 'dashboard', icon: LayoutDashboard, label: 'Home' },
+  { id: 'planner', icon: Calendar, label: 'Plan' },
+  { id: 'health', icon: Heart, label: 'Health', color: 'text-health' },
+  { id: 'wealth', icon: DollarSign, label: 'Wealth', color: 'text-wealth' },
+  { id: 'business', icon: Building2, label: 'Biz', color: 'text-business' },
+];
+
 interface AppLayoutProps {
   currentPage: AppPage;
   onNavigate: (page: AppPage) => void;
@@ -38,6 +47,7 @@ export default function AppLayout({ currentPage, onNavigate, children }: AppLayo
   const { profile, signOut } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(true);
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
 
   // Load theme preference
   useEffect(() => {
@@ -67,6 +77,7 @@ export default function AppLayout({ currentPage, onNavigate, children }: AppLayo
   const handleNav = (page: AppPage) => {
     onNavigate(page);
     setMobileOpen(false);
+    setShowMoreMenu(false);
   };
 
   const SidebarContent = () => (
@@ -134,6 +145,9 @@ export default function AppLayout({ currentPage, onNavigate, children }: AppLayo
     </div>
   );
 
+  // More menu items (remaining nav items)
+  const moreMenuItems = navItems.slice(5); // Items after first 5
+
   return (
     <div className="flex h-screen bg-[var(--bg-body)] overflow-hidden">
       {/* Desktop Sidebar */}
@@ -175,11 +189,78 @@ export default function AppLayout({ currentPage, onNavigate, children }: AppLayo
           </button>
         </header>
 
-        {/* Page content */}
-        <main className="flex-1 overflow-y-auto">
+        {/* Page content - Add bottom padding for mobile nav */}
+        <main className="flex-1 overflow-y-auto pb-16 md:pb-0">
           {children}
         </main>
       </div>
+
+      {/* Mobile Bottom Navigation Bar - ADDED */}
+      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-[var(--bg-card)] border-t border-[var(--border)] z-40 safe-area-bottom">
+        <div className="flex items-center justify-around py-1 px-2">
+          {mobileNavItems.map(({ id, icon: Icon, label, color }) => {
+            const isActive = currentPage === id;
+            return (
+              <button
+                key={id}
+                onClick={() => handleNav(id)}
+                className={`flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg transition-all min-w-[60px] ${
+                  isActive ? 'text-wealth' : 'text-[var(--text-secondary)]'
+                }`}
+              >
+                <Icon className={`w-5 h-5 ${isActive && color ? color : ''} ${isActive ? 'text-wealth' : ''}`} />
+                <span className="text-[10px] font-medium">{label}</span>
+              </button>
+            );
+          })}
+          
+          {/* More button */}
+          <div className="relative">
+            <button
+              onClick={() => setShowMoreMenu(!showMoreMenu)}
+              className={`flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg transition-all min-w-[60px] ${
+                showMoreMenu ? 'text-wealth' : 'text-[var(--text-secondary)]'
+              }`}
+            >
+              <Menu className="w-5 h-5" />
+              <span className="text-[10px] font-medium">More</span>
+            </button>
+            
+            {/* More menu popup */}
+            {showMoreMenu && (
+              <>
+                <div 
+                  className="fixed inset-0 z-40" 
+                  onClick={() => setShowMoreMenu(false)} 
+                />
+                <div className="absolute bottom-14 right-0 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-lg py-2 z-50 min-w-[140px]">
+                  {moreMenuItems.map(({ id, icon: Icon, label, color }) => (
+                    <button
+                      key={id}
+                      onClick={() => handleNav(id)}
+                      className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
+                        currentPage === id
+                          ? 'bg-[var(--bg-secondary)] text-[var(--text-primary)]'
+                          : 'text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)]'
+                      }`}
+                    >
+                      <Icon className={`w-4 h-4 ${currentPage === id && color ? color : ''}`} />
+                      <span>{label}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Add safe area padding for notched phones */}
+      <style>{`
+        .safe-area-bottom {
+          padding-bottom: env(safe-area-inset-bottom, 0px);
+        }
+      `}</style>
     </div>
   );
 }
