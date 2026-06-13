@@ -10,6 +10,18 @@ import type { Skill, Book, Course } from '../types';
 type Tab = 'skills' | 'books' | 'courses';
 type EditMode = 'create' | 'edit';
 
+// Safe query for loading data - splits into groups to avoid connection pool exhaustion
+async function safeQuery<T>(queryFn: () => Promise<T>, retries = 1): Promise<T> {
+  try {
+    return await queryFn();
+  } catch (error) {
+    if (retries === 0) throw error;
+    console.log('Query failed, retrying...');
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return safeQuery(queryFn, retries - 1);
+  }
+}
+
 export default function Knowledge() {
   const { user } = useAuth();
   const [tab, setTab] = useState<Tab>('skills');
@@ -19,6 +31,7 @@ export default function Knowledge() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   const today = new Date().toISOString().split('T')[0];
   
@@ -59,23 +72,37 @@ export default function Knowledge() {
 
   const levelLabels = ['', 'Beginner', 'Basic', 'Intermediate', 'Advanced', 'Expert'];
 
-  // Load all knowledge data with caching
+  // Load all knowledge data with caching and grouping
   const reloadKnowledge = useCallback(async () => {
     if (!user) return;
 
-    const [s, b, c] = await Promise.all([
-      supabase.from('skills').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
-      supabase.from('books').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
-      supabase.from('courses').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
-    ]);
+    setLoading(true);
+    setLoadError(false);
+    try {
+      // Group 1: Skills and Books
+      const [s, b] = await safeQuery(async () => Promise.all([
+        supabase.from('skills').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+        supabase.from('books').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+      ]));
+      
+      // Group 2: Courses
+      const [c] = await safeQuery(async () => Promise.all([
+        supabase.from('courses').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+      ]));
 
-    if (s.error) console.error('Skills Error:', s.error);
-    if (b.error) console.error('Books Error:', b.error);
-    if (c.error) console.error('Courses Error:', c.error);
+      if (s.error) console.error('Skills Error:', s.error);
+      if (b.error) console.error('Books Error:', b.error);
+      if (c.error) console.error('Courses Error:', c.error);
 
-    setSkills((s.data || []) as Skill[]);
-    setBooks((b.data || []) as Book[]);
-    setCourses((c.data || []) as Course[]);
+      setSkills((s.data || []) as Skill[]);
+      setBooks((b.data || []) as Book[]);
+      setCourses((c.data || []) as Course[]);
+    } catch (err) {
+      console.error('Load error:', err);
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
   }, [user]);
 
   // Refresh all data
@@ -103,12 +130,7 @@ export default function Knowledge() {
 
   useEffect(() => {
     if (!user) return;
-    const load = async () => {
-      setLoading(true);
-      await reloadKnowledge();
-      setLoading(false);
-    };
-    load();
+    reloadKnowledge();
   }, [user, reloadKnowledge]);
 
   // Reset form
@@ -139,15 +161,11 @@ export default function Knowledge() {
   };
 
   // Generic retry function for insert/update operations
-  const withRetry = async (operation: () => Promise<any>, operationName: string, retryCount = 0): Promise<any> => {
+  const withRetry = async (operation: () => Promise<any>, operationName: string): Promise<any> => {
     try {
       return await operation();
     } catch (err: any) {
-      if (retryCount === 0 && (err.message === 'Failed to fetch' || err.message === 'Load failed')) {
-        console.log(`Retrying ${operationName} after 500ms...`);
-        await new Promise(resolve => setTimeout(resolve, 500));
-        return withRetry(operation, operationName, 1);
-      }
+      console.error(`${operationName} failed:`, err?.message);
       throw err;
     }
   };
@@ -479,6 +497,20 @@ export default function Knowledge() {
       else updateCourse();
     }
   };
+
+  // Error state
+  if (loadError) {
+    return (
+      <div className="p-6 md:p-8 max-w-5xl mx-auto text-center">
+        <div className="card p-8 max-w-md mx-auto">
+          <p className="text-red-400 mb-4">Failed to load knowledge data</p>
+          <button onClick={() => window.location.reload()} className="btn-primary">
+            Refresh Page
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // Loading skeleton
   if (loading) {

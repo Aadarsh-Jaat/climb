@@ -28,7 +28,37 @@ let plannerCache: {
   timestamp: number;
 } | null = null;
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
-
+// Fast retry utility - tries immediately, retries once quickly if needed
+async function withFastRetry<T>(
+  operation: () => Promise<T>,
+  operationName: string
+): Promise<T> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return await operation();
+    } catch (err: any) {
+      console.error(`${operationName} - Attempt ${attempt} failed:`, err.message);
+      if (attempt === 1) {
+        // Small delay only on first retry (200ms)
+        await new Promise(resolve => setTimeout(resolve, 200));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error(`${operationName} failed after 2 attempts`);
+}
+// Safe query for loading data - splits into groups to avoid connection pool exhaustion
+async function safeQuery<T>(queryFn: () => Promise<T>, retries = 1): Promise<T> {
+  try {
+    return await queryFn();
+  } catch (error) {
+    if (retries === 0) throw error;
+    console.log('Query failed, retrying...');
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return safeQuery(queryFn, retries - 1);
+  }
+}
 export default function Planner() {
   const { user } = useAuth();
   const [tab, setTab] = useState<Tab>('tasks');
@@ -42,6 +72,7 @@ export default function Planner() {
   const [loading, setLoading] = useState(true);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingGoal, setEditingGoal] = useState<Goal | null>(null);
   const [showGoalForm, setShowGoalForm] = useState(false);
@@ -87,68 +118,78 @@ export default function Planner() {
     warmupConnection();
   }, [user]);
 
-  // Load all data with caching
   const loadAllData = useCallback(async (forceRefresh = false) => {
-    if (!user) return;
+  if (!user) return;
+  
+  if (!forceRefresh && plannerCache && (Date.now() - plannerCache.timestamp) < CACHE_DURATION) {
+    console.log('Using cached planner data');
+    setTasks(plannerCache.tasks);
+    setRoutines(plannerCache.routines);
+    setHabits(plannerCache.habits);
+    setGoals(plannerCache.goals);
+    setLoading(false);
+    setInitialLoadDone(true);
+    return;
+  }
+  
+  if (loadingRef.current) return;
+  loadingRef.current = true;
+  
+  setLoading(true);
+  setLoadError(false);
+  try {
+    // Group 1: Tasks and Routines
+    const [t, r] = await safeQuery(async () => Promise.all([
+      supabase.from('tasks').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(100),
+      supabase.from('routines').select('*').eq('user_id', user.id).eq('active', true).order('order_index', { ascending: true, nullsFirst: false }).order('created_at', { ascending: false }),
+    ]));
     
-    if (!forceRefresh && plannerCache && (Date.now() - plannerCache.timestamp) < CACHE_DURATION) {
-      console.log('Using cached planner data');
-      setTasks(plannerCache.tasks);
-      setRoutines(plannerCache.routines);
-      setHabits(plannerCache.habits);
-      setGoals(plannerCache.goals);
-      setLoading(false);
-      setInitialLoadDone(true);
-      return;
-    }
+    // Group 2: Habits and Goals
+    const [h, g] = await safeQuery(async () => Promise.all([
+      supabase.from('habits').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50),
+      supabase.from('goals').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(30),
+    ]));
     
-    if (loadingRef.current) return;
-    loadingRef.current = true;
+    // Group 3: History and Logs
+    const [hist, rl, hl] = await safeQuery(async () => Promise.all([
+      supabase.from('task_history').select('*').eq('user_id', user.id).order('completed_date', { ascending: false }).limit(100),
+      supabase.from('routine_logs').select('*').eq('user_id', user.id).order('logged_date', { ascending: false }).limit(100),
+      supabase.from('habit_logs').select('*').eq('user_id', user.id).order('logged_date', { ascending: false }).limit(200),
+    ]));
     
-    setLoading(true);
-    try {
-      const [t, r, h, g, hist, rl, hl] = await Promise.all([
-        supabase.from('tasks').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(100),
-        supabase.from('routines').select('*').eq('user_id', user.id).eq('active', true).order('order_index', { ascending: true, nullsFirst: false }).order('created_at', { ascending: false }),
-        supabase.from('habits').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50),
-        supabase.from('goals').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(30),
-        supabase.from('task_history').select('*').eq('user_id', user.id).order('completed_date', { ascending: false }).limit(100),
-        supabase.from('routine_logs').select('*').eq('user_id', user.id).order('logged_date', { ascending: false }).limit(100),
-        supabase.from('habit_logs').select('*').eq('user_id', user.id).order('logged_date', { ascending: false }).limit(200),
-      ]);
-      
-      const tasksData = (t.data || []) as Task[];
-      const routinesData = (r.data || []) as Routine[];
-      const habitsData = (h.data || []) as Habit[];
-      const goalsData = (g.data || []) as Goal[];
-      const historyData = (hist.data || []) as TaskHistoryRecord[];
-      const routineLogsData = (rl.data || []) as RoutineLog[];
-      const habitLogsData = (hl.data || []) as HabitLog[];
-      
-      setTasks(tasksData);
-      setRoutines(routinesData);
-      setHabits(habitsData);
-      setGoals(goalsData);
-      setHistory(historyData);
-      setRoutineLogs(routineLogsData);
-      setHabitLogs(habitLogsData);
-      
-      plannerCache = {
-        tasks: tasksData,
-        routines: routinesData,
-        habits: habitsData,
-        goals: goalsData,
-        timestamp: Date.now()
-      };
-      
-    } catch (err) {
-      console.error('Load error:', err);
-    } finally {
-      setLoading(false);
-      setInitialLoadDone(true);
-      loadingRef.current = false;
-    }
-  }, [user]);
+    const tasksData = (t.data || []) as Task[];
+    const routinesData = (r.data || []) as Routine[];
+    const habitsData = (h.data || []) as Habit[];
+    const goalsData = (g.data || []) as Goal[];
+    const historyData = (hist.data || []) as TaskHistoryRecord[];
+    const routineLogsData = (rl.data || []) as RoutineLog[];
+    const habitLogsData = (hl.data || []) as HabitLog[];
+    
+    setTasks(tasksData);
+    setRoutines(routinesData);
+    setHabits(habitsData);
+    setGoals(goalsData);
+    setHistory(historyData);
+    setRoutineLogs(routineLogsData);
+    setHabitLogs(habitLogsData);
+    
+    plannerCache = {
+      tasks: tasksData,
+      routines: routinesData,
+      habits: habitsData,
+      goals: goalsData,
+      timestamp: Date.now()
+    };
+    
+  } catch (err) {
+    console.error('Load error:', err);
+    setLoadError(true);
+  } finally {
+    setLoading(false);
+    setInitialLoadDone(true);
+    loadingRef.current = false;
+  }
+}, [user]);
 
   useEffect(() => {
     if (user && !initialLoadDone) {
@@ -293,48 +334,43 @@ export default function Planner() {
   };
   
   const addTask = async () => {
-    if (!itemTitle.trim() || !user) return;
-    if (saving) return;
+  if (!itemTitle.trim() || !user) return;
+  if (saving) return;
+  
+  setSaving(true);
+  
+  try {
+    const data = await withFastRetry(async () => {
+      const { data, error } = await supabase
+        .from('tasks')
+        .insert({
+          user_id: user.id,
+          title: itemTitle.trim(),
+          category: itemCat,
+          due_date: itemDate || null,
+          priority: itemPriority.toLowerCase(),
+          completed: false,
+          notes: itemNotes || '',
+          recurring: null,
+        })
+        .select()
+        .single();
+      
+      if (error) throw error;
+      return data;
+    }, 'Add task');
     
-    setSaving(true);
-    
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const { data, error } = await supabase
-          .from('tasks')
-          .insert({
-            user_id: user.id,
-            title: itemTitle.trim(),
-            category: itemCat,
-            due_date: itemDate || null,
-            priority: itemPriority.toLowerCase(),
-            completed: false,
-            notes: itemNotes || '',
-            recurring: null,
-          })
-          .select()
-          .single();
-        
-        if (error) throw error;
-        if (data) {
-          setTasks(prev => [data as Task, ...prev]);
-          plannerCache = null;
-          resetForm();
-          setSaving(false);
-          return;
-        }
-      } catch (err: any) {
-        console.error(`Attempt ${attempt} failed:`, err.message);
-        if (attempt < 3) {
-          await new Promise(resolve => setTimeout(resolve, attempt * 500));
-        } else {
-          alert(`Task not added: ${err.message}`);
-        }
-      }
+    if (data) {
+      setTasks(prev => [data as Task, ...prev]);
+      plannerCache = null;
+      resetForm();
     }
+  } catch (err: any) {
+    alert(`Failed to add task: ${err.message}`);
+  } finally {
     setSaving(false);
-  };
-
+  }
+};
   // ROUTINE CRUD with time
   const toggleRoutine = async (routine: Routine) => {
     if (!user) return;
@@ -385,47 +421,42 @@ export default function Planner() {
   };
   
   const addRoutine = async () => {
-    if (!itemTitle.trim() || !user) return;
-    if (saving) return;
+  if (!itemTitle.trim() || !user) return;
+  if (saving) return;
+  
+  setSaving(true);
+  
+  try {
+    const data = await withFastRetry(async () => {
+      const { data, error } = await supabase
+        .from('routines')
+        .insert({
+          user_id: user.id,
+          title: itemTitle.trim(),
+          description: itemDesc?.trim() || '',
+          category: itemCat.toLowerCase(),
+          routine_time: itemTime || null,
+          order_index: routines.length,
+          active: true,
+        })
+        .select()
+        .single();
+      
+      if (error) throw error;
+      return data;
+    }, 'Add routine');
     
-    setSaving(true);
-    
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const { data, error } = await supabase
-          .from('routines')
-          .insert({
-            user_id: user.id,
-            title: itemTitle.trim(),
-            description: itemDesc?.trim() || '',
-            category: itemCat.toLowerCase(),
-            routine_time: itemTime || null,
-            order_index: routines.length, // Add at the end
-            active: true,
-          })
-          .select()
-          .single();
-        
-        if (error) throw error;
-        if (data) {
-          setRoutines(prev => [...prev, data as Routine]);
-          plannerCache = null;
-          resetForm();
-          setSaving(false);
-          return;
-        }
-      } catch (err: any) {
-        console.error(`Attempt ${attempt} failed:`, err.message);
-        if (attempt < 3) {
-          await new Promise(resolve => setTimeout(resolve, attempt * 500));
-        } else {
-          alert(`Routine not added: ${err.message}`);
-        }
-      }
+    if (data) {
+      setRoutines(prev => [...prev, data as Routine]);
+      plannerCache = null;
+      resetForm();
     }
+  } catch (err: any) {
+    alert(`Failed to add routine: ${err.message}`);
+  } finally {
     setSaving(false);
-  };
-
+  }
+};
   // HABIT CRUD (keeping existing)
   const toggleHabit = async (habit: Habit, date: string) => {
     if (!user) return;
@@ -601,137 +632,134 @@ export default function Planner() {
   };
   
   const addHabit = async () => {
-    if (!itemTitle.trim()) {
-      alert('Please enter a habit name');
-      return;
-    }
-    
-    if (!user) {
-      alert('Please log in');
-      return;
-    }
-    
-    if (saving) return;
-    
-    setSaving(true);
-    
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const { data, error } = await supabase
-          .from('habits')
-          .insert({
-            user_id: user.id,
-            title: itemTitle.trim(),
-            category: itemCat.toLowerCase(),
-            streak: 0,
-            best_streak: 0,
-            active: true,
-          })
-          .select()
-          .single();
-        
-        if (error) throw error;
-        
-        if (data) {
-          const newHabit = data as Habit;
-          setHabits(prev => [newHabit, ...prev]);
-          plannerCache = null;
-          resetForm();
-          setSaving(false);
-          return;
-        }
-      } catch (err: any) {
-        console.error(`Attempt ${attempt} failed:`, err.message);
-        if (attempt < 3) {
-          await new Promise(resolve => setTimeout(resolve, attempt * 500));
-        } else {
-          alert(`Failed to add habit: ${err.message || 'Unknown error'}`);
-        }
-      }
-    }
-    setSaving(false);
-  };
-
-  // GOAL CRUD
-  const addGoal = async () => {
-    if (!goalTitle.trim() || !user) return;
-    if (saving) return;
-    
-    setSaving(true);
-    
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const start = goalStart ? parseFloat(goalStart) : 0;
-        const current = goalCurrent ? parseFloat(goalCurrent) : start;
-        const target = goalTarget ? parseFloat(goalTarget) : null;
-        
-        const payload = {
-          user_id: user.id,
-          title: goalTitle.trim(),
-          pillar: goalPillar,
-          start_value: start,
-          current_value: current,
-          target_value: target,
-          unit: goalUnit,
-          target_date: goalDate || null,
-          completed: false,
-        };
-        
-        if (editingGoal) {
-          const { data, error } = await supabase
-            .from('goals')
-            .update(payload)
-            .eq('id', editingGoal.id)
-            .select()
-            .single();
-          
-          if (error) throw error;
-          if (data) setGoals(prev => prev.map(g => g.id === editingGoal.id ? data as Goal : g));
-        } else {
-          const { data, error } = await supabase
-            .from('goals')
-            .insert(payload)
-            .select()
-            .single();
-          
-          if (error) throw error;
-          if (data) {
-            const newGoal = data as Goal;
-            setGoals(prev => [newGoal, ...prev]);
-            plannerCache = null;
-            
-            await supabase.from('goal_activity').insert({
-              goal_id: newGoal.id,
-              user_id: user.id,
-              value: current,
-              activity_date: today,
-              notes: null,
-            });
-          }
-        }
-        
-        setGoalTitle('');
-        setGoalStart('');
-        setGoalCurrent('');
-        setGoalTarget('');
-        setGoalUnit('');
-        setGoalDate('');
-        setEditingGoal(null);
-        setShowGoalForm(false);
-        setSaving(false);
-        return;
-      } catch (err: any) {
-        console.error(`Attempt ${attempt} failed:`, err.message);
-        if (attempt < 3) {
-          await new Promise(resolve => setTimeout(resolve, attempt * 500));
-        } else {
-          alert(`Failed to ${editingGoal ? 'update' : 'add'} goal: ${err.message}`);
-        }
-      }
-    }
-    setSaving(false);
-  };
+  if (!itemTitle.trim()) {
+    alert('Please enter a habit name');
+    return;
+  }
   
+  if (!user) {
+    alert('Please log in');
+    return;
+  }
+  
+  if (saving) return;
+  
+  setSaving(true);
+  
+  try {
+    const data = await withFastRetry(async () => {
+      const { data, error } = await supabase
+        .from('habits')
+        .insert({
+          user_id: user.id,
+          title: itemTitle.trim(),
+          category: itemCat.toLowerCase(),
+          streak: 0,
+          best_streak: 0,
+          active: true,
+        })
+        .select()
+        .single();
+      
+      if (error) throw error;
+      return data;
+    }, 'Add habit');
+    
+    if (data) {
+      const newHabit = data as Habit;
+      setHabits(prev => [newHabit, ...prev]);
+      plannerCache = null;
+      resetForm();
+    }
+  } catch (err: any) {
+    alert(`Failed to add habit: ${err.message || 'Unknown error'}`);
+  } finally {
+    setSaving(false);
+  }
+};
+
+  const addGoal = async () => {
+  if (!goalTitle.trim() || !user) return;
+  if (saving) return;
+  
+  setSaving(true);
+  
+  try {
+    const start = goalStart ? parseFloat(goalStart) : 0;
+    const current = goalCurrent ? parseFloat(goalCurrent) : start;
+    const target = goalTarget ? parseFloat(goalTarget) : null;
+    
+    const payload = {
+      user_id: user.id,
+      title: goalTitle.trim(),
+      pillar: goalPillar,
+      start_value: start,
+      current_value: current,
+      target_value: target,
+      unit: goalUnit,
+      target_date: goalDate || null,
+      completed: false,
+    };
+    
+    let result;
+    
+    if (editingGoal) {
+      const { data, error } = await supabase
+        .from('goals')
+        .update(payload)
+        .eq('id', editingGoal.id)
+        .select()
+        .single();
+      
+      if (error) throw error;
+      result = data;
+      if (result) {
+        setGoals(prev => prev.map(g => g.id === editingGoal.id ? result as Goal : g));
+      }
+    } else {
+      const { data, error } = await supabase
+        .from('goals')
+        .insert(payload)
+        .select()
+        .single();
+      
+      if (error) throw error;
+      result = data;
+      
+      if (result) {
+        const newGoal = result as Goal;
+        setGoals(prev => [newGoal, ...prev]);
+        
+        await supabase.from('goal_activity').insert({
+          goal_id: newGoal.id,
+          user_id: user.id,
+          value: current,
+          activity_date: today,
+          notes: null,
+        });
+      }
+    }
+    
+    if (result) {
+      plannerCache = null;
+    }
+    
+    setGoalTitle('');
+    setGoalStart('');
+    setGoalCurrent('');
+    setGoalTarget('');
+    setGoalUnit('');
+    setGoalDate('');
+    setEditingGoal(null);
+    setShowGoalForm(false);
+    
+  } catch (err: any) {
+    console.error('Goal error:', err);
+    alert(`Failed to ${editingGoal ? 'update' : 'add'} goal: ${err.message}`);
+  } finally {
+    setSaving(false);
+  }
+};
   const updateGoalProgress = async (goal: Goal, newValue: number) => {
     if (!user) return;
     
@@ -879,22 +907,36 @@ export default function Planner() {
     return aIndex - bIndex;
   });
 
-  // Loading skeleton
-  if (loading && !initialLoadDone) {
-    return (
-      <div className="p-6 md:p-8 max-w-5xl mx-auto">
-        <div className="animate-pulse space-y-4">
-          <div className="h-8 w-32 bg-[var(--bg-secondary)] rounded-xl" />
-          <div className="h-10 bg-[var(--bg-secondary)] rounded-xl w-64" />
-          <div className="space-y-3">
-            {[1, 2, 3].map(i => (
-              <div key={i} className="h-16 bg-[var(--bg-card)] rounded-xl border border-[var(--border)]" />
-            ))}
-          </div>
+  // Error state
+if (loadError) {
+  return (
+    <div className="p-6 md:p-8 max-w-5xl mx-auto text-center">
+      <div className="card p-8 max-w-md mx-auto">
+        <p className="text-red-400 mb-4">Failed to load planner data</p>
+        <button onClick={() => window.location.reload()} className="btn-primary">
+          Refresh Page
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Loading skeleton
+if (loading && !initialLoadDone) {
+  return (
+    <div className="p-6 md:p-8 max-w-5xl mx-auto">
+      <div className="animate-pulse space-y-4">
+        <div className="h-8 w-32 bg-[var(--bg-secondary)] rounded-xl" />
+        <div className="h-10 bg-[var(--bg-secondary)] rounded-xl w-64" />
+        <div className="space-y-3">
+          {[1, 2, 3].map(i => (
+            <div key={i} className="h-16 bg-[var(--bg-card)] rounded-xl border border-[var(--border)]" />
+          ))}
         </div>
       </div>
-    );
-  }
+    </div>
+  );
+}
 
   return (
     <div className="p-6 md:p-8 max-w-5xl mx-auto animate-fade-in">

@@ -33,6 +33,18 @@ function getPillarText(pillar: string) {
   return map[pillar] || 'text-[var(--text-muted)]';
 }
 
+// Helper function for safe query with retry
+async function safeQuery<T>(queryFn: () => Promise<T>, retries = 1): Promise<T> {
+  try {
+    return await queryFn();
+  } catch (error) {
+    if (retries === 0) throw error;
+    console.log('Query failed, retrying...');
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return safeQuery(queryFn, retries - 1);
+  }
+}
+
 export default function Dashboard({ onNavigate }: DashboardProps) {
   const { user, profile } = useAuth();
   const [goals, setGoals] = useState<Goal[]>([]);
@@ -41,34 +53,63 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
   const [careerProfile, setCareerProfile] = useState<CareerProfile | null>(null);
   const [netWorth, setNetWorth] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     if (!user) return;
     const load = async () => {
-      const today = new Date().toISOString().split('T')[0];
-      const [goalsRes, tasksRes, accountsRes, assetsRes, investmentsRes, liabilitiesRes, tracksRes, profileRes] = await Promise.all([
-        supabase.from('goals').select('*').eq('user_id', user.id).eq('completed', false).order('created_at', { ascending: false }).limit(8),
-        supabase.from('tasks').select('*').eq('user_id', user.id).or(`due_date.eq.${today},due_date.is.null`).order('created_at', { ascending: false }),
-        supabase.from('accounts').select('balance').eq('user_id', user.id),
-        supabase.from('assets').select('value').eq('user_id', user.id),
-        supabase.from('investments').select('current_value').eq('user_id', user.id),
-        supabase.from('liabilities').select('amount').eq('user_id', user.id),
-        supabase.from('career_tracks').select('*').eq('user_id', user.id).order('priority', { ascending: false }),
-        supabase.from('career_profile').select('*').eq('id', user.id).maybeSingle(),
-      ]);
+      try {
+        setLoadError(false);
+        const today = new Date().toISOString().split('T')[0];
+        
+        // Group 1: Goals and Tasks (most important)
+        const [goalsRes, tasksRes] = await safeQuery(async () => Promise.all([
+          supabase.from('goals').select('*').eq('user_id', user.id).eq('completed', false).order('created_at', { ascending: false }).limit(8),
+          supabase.from('tasks').select('*').eq('user_id', user.id).or(`due_date.eq.${today},due_date.is.null`).order('created_at', { ascending: false }),
+        ]));
+        
+        // Group 2: Career data
+        const [tracksRes, profileRes] = await safeQuery(async () => Promise.all([
+          supabase.from('career_tracks').select('*').eq('user_id', user.id).order('priority', { ascending: false }),
+          supabase.from('career_profile').select('*').eq('id', user.id).maybeSingle(),
+        ]));
+        
+        // Group 3: Financial data (accounts, assets, investments, liabilities, loans)
+        const [accountsRes, assetsRes, investmentsRes, liabilitiesRes, loansRes] = await safeQuery(async () => Promise.all([
+          supabase.from('accounts').select('balance').eq('user_id', user.id),
+          supabase.from('assets').select('value').eq('user_id', user.id),
+          supabase.from('investments').select('current_value').eq('user_id', user.id),
+          supabase.from('liabilities').select('amount').eq('user_id', user.id),
+          supabase.from('loans').select('type, remaining_amount').eq('user_id', user.id),
+        ]));
 
-      setGoals((goalsRes.data || []) as Goal[]);
-      setTasks((tasksRes.data || []) as Task[]);
-      setTracks((tracksRes.data || []) as CareerTrack[]);
-      setCareerProfile((profileRes.data || null) as CareerProfile | null);
+        setGoals((goalsRes.data || []) as Goal[]);
+        setTasks((tasksRes.data || []) as Task[]);
+        setTracks((tracksRes.data || []) as CareerTrack[]);
+        setCareerProfile((profileRes.data || null) as CareerProfile | null);
 
-      const totalAssets =
-        (accountsRes.data || []).reduce((s: number, a: any) => s + (a.balance || 0), 0) +
-        (assetsRes.data || []).reduce((s: number, a: any) => s + (a.value || 0), 0) +
-        (investmentsRes.data || []).reduce((s: number, a: any) => s + (a.current_value || 0), 0);
-      const totalLiabilities = (liabilitiesRes.data || []).reduce((s: number, l: any) => s + (l.amount || 0), 0);
-      setNetWorth(totalAssets - totalLiabilities);
-      setLoading(false);
+        // Calculate Net Worth consistently with Wealth page
+        const totalCash = (accountsRes.data || []).reduce((s: number, a: any) => s + (a.balance || 0), 0);
+        const totalAssetsValue = (assetsRes.data || []).reduce((s: number, a: any) => s + (a.value || 0), 0);
+        const totalInvestments = (investmentsRes.data || []).reduce((s: number, a: any) => s + (a.current_value || 0), 0);
+        const totalLiabilitiesValue = (liabilitiesRes.data || []).reduce((s: number, l: any) => s + (l.amount || 0), 0);
+        
+        const totalLent = (loansRes.data || [])
+          .filter((l: any) => l.type === 'lent')
+          .reduce((s: number, l: any) => s + (l.remaining_amount || 0), 0);
+        const totalBorrowed = (loansRes.data || [])
+          .filter((l: any) => l.type === 'borrowed')
+          .reduce((s: number, l: any) => s + (l.remaining_amount || 0), 0);
+        
+        const netWorthCalc = totalCash + totalAssetsValue + totalInvestments + totalLent - totalLiabilitiesValue - totalBorrowed;
+        setNetWorth(netWorthCalc);
+        
+      } catch (err) {
+        console.error('Load error:', err);
+        setLoadError(true);
+      } finally {
+        setLoading(false);
+      }
     };
     load();
   }, [user]);
@@ -103,9 +144,6 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
     : null;
 
   const formatCurrency = (n: number) => {
-    if (Math.abs(n) >= 10000000) return `₹${(n / 10000000).toFixed(1)}Cr`;
-    if (Math.abs(n) >= 100000) return `₹${(n / 100000).toFixed(1)}L`;
-    if (Math.abs(n) >= 1000) return `₹${(n / 1000).toFixed(1)}K`;
     return `₹${n.toLocaleString('en-IN')}`;
   };
 
@@ -120,6 +158,19 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
   const primaryTrack = tracks.find(t => t.priority === 'primary');
   const secondaryTracks = tracks.filter(t => t.priority === 'secondary');
   const govtTrack = tracks.find(t => t.type === 'government_exam');
+
+  if (loadError) {
+    return (
+      <div className="p-6 md:p-8 text-center">
+        <div className="card p-8 max-w-md mx-auto">
+          <p className="text-red-400 mb-4">Failed to load dashboard data</p>
+          <button onClick={() => window.location.reload()} className="btn-primary">
+            Refresh Page
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
@@ -166,7 +217,7 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
           <p className={`text-2xl font-bold ${netWorth >= 0 ? 'text-wealth' : 'text-red-400'}`}>
             {formatCurrency(netWorth)}
           </p>
-          <p className="text-xs text-[var(--text-secondary)] mt-1">Assets - Liabilities</p>
+          <p className="text-xs text-[var(--text-secondary)] mt-1">Assets + Lent - Liabilities - Borrowed</p>
         </div>
 
         <div className="card p-5">
@@ -186,7 +237,7 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
         </div>
       </div>
 
-      {/* Career Tracks Summary - NEW */}
+      {/* Career Tracks Summary */}
       {tracks.length > 0 && (
         <div className="card p-5 mb-6">
           <div className="flex items-center gap-2 mb-4">
@@ -239,7 +290,7 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
         </div>
       )}
 
-      {/* Government Exam Preparation Section - NEW */}
+      {/* Government Exam Preparation Section */}
       {isGovtAspirant && careerProfile && careerProfile.exam_name && (
         <div className="card p-5 mb-6 border-knowledge/20 bg-knowledge/5">
           <div className="flex items-center justify-between mb-4">
@@ -399,7 +450,7 @@ export default function Dashboard({ onNavigate }: DashboardProps) {
         </div>
       </div>
 
-      {/* Exam Preparation Quick Tip - NEW */}
+      {/* Exam Preparation Quick Tip */}
       {isGovtAspirant && govtTrack && !careerProfile?.mock_test_score && (
         <div className="mt-6 card p-4 border-knowledge/20 bg-knowledge/5">
           <div className="flex items-center gap-3">

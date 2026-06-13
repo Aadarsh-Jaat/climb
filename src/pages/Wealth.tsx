@@ -14,11 +14,11 @@ const accountTypes = ['bank', 'wallet', 'cash'];
 const liabilityTypes = ['loan', 'credit_card', 'other'];
 const loanTypes = ['lent', 'borrowed'];
 
-// Helper function for retry operations
+// Helper function for retry operations (kept for mutations)
 async function withRetry<T>(
   operation: () => Promise<T>,
-  maxRetries: number = 3,
-  delayMs: number = 500
+  maxRetries: number = 2,
+  delayMs: number = 200
 ): Promise<T> {
   let lastError: any;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -28,11 +28,23 @@ async function withRetry<T>(
       lastError = err;
       console.error(`Attempt ${attempt}/${maxRetries} failed:`, err);
       if (attempt < maxRetries) {
-        await new Promise(resolve => setTimeout(resolve, delayMs * attempt));
+        await new Promise(resolve => setTimeout(resolve, delayMs));
       }
     }
   }
   throw lastError;
+}
+
+// Safe query for loading data - splits into groups to avoid connection pool exhaustion
+async function safeQuery<T>(queryFn: () => Promise<T>, retries = 1): Promise<T> {
+  try {
+    return await queryFn();
+  } catch (error) {
+    if (retries === 0) throw error;
+    console.log('Query failed, retrying...');
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return safeQuery(queryFn, retries - 1);
+  }
 }
 
 export default function Wealth() {
@@ -49,6 +61,7 @@ export default function Wealth() {
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [monthlyExpenses, setMonthlyExpenses] = useState(50000);
   const [showBalanceModal, setShowBalanceModal] = useState<string | null>(null);
   const [balanceAmount, setBalanceAmount] = useState('');
@@ -85,38 +98,50 @@ export default function Wealth() {
   const [fdMaturityAmount, setFdMaturityAmount] = useState('');
   const [fdMaturityDate, setFdMaturityDate] = useState('');
 
-  // Fetch all data including investment transactions with retry
   const fetchAllData = useCallback(async () => {
-    if (!user) return;
+  if (!user) return;
+  
+  setLoading(true);
+  setLoadError(false);
+  try {
+    // Group 1: Accounts and Assets
+    const [a, as] = await safeQuery(async () => Promise.all([
+      supabase.from('accounts').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+      supabase.from('assets').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+    ]));
     
-    setLoading(true);
-    try {
-      await withRetry(async () => {
-        const [a, as, inv, lib, wg, ln, tx] = await Promise.all([
-          supabase.from('accounts').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
-          supabase.from('assets').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
-          supabase.from('investments').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
-          supabase.from('liabilities').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
-          supabase.from('wealth_goals').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
-          supabase.from('loans').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
-          supabase.from('investment_transactions').select('*').eq('user_id', user.id).order('transaction_date', { ascending: false }),
-        ]);
-        
-        setAccounts((a.data || []) as Account[]);
-        setAssets((as.data || []) as Asset[]);
-        setInvestments((inv.data || []) as Investment[]);
-        setLiabilities((lib.data || []) as Liability[]);
-        setWealthGoals((wg.data || []) as WealthGoal[]);
-        setLoans((ln.data || []) as Loan[]);
-        setInvestmentTransactions((tx.data || []) as any[]);
-      });
-    } catch (err) {
-      console.error('Fetch error:', err);
-      alert('Failed to load data after multiple attempts. Please check your connection.');
-    } finally {
-      setLoading(false);
-    }
-  }, [user]);
+    // Group 2: Investments and Liabilities
+    const [inv, lib] = await safeQuery(async () => Promise.all([
+      supabase.from('investments').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+      supabase.from('liabilities').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+    ]));
+    
+    // Group 3: Goals and Loans
+    const [wg, ln] = await safeQuery(async () => Promise.all([
+      supabase.from('wealth_goals').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+      supabase.from('loans').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+    ]));
+    
+    // Group 4: Transactions (can load separately)
+    const [tx] = await safeQuery(async () => Promise.all([
+      supabase.from('investment_transactions').select('*').eq('user_id', user.id).order('transaction_date', { ascending: false }),
+    ]));
+    
+    setAccounts((a.data || []) as Account[]);
+    setAssets((as.data || []) as Asset[]);
+    setInvestments((inv.data || []) as Investment[]);
+    setLiabilities((lib.data || []) as Liability[]);
+    setWealthGoals((wg.data || []) as WealthGoal[]);
+    setLoans((ln.data || []) as Loan[]);
+    setInvestmentTransactions((tx.data || []) as any[]);
+    
+  } catch (err) {
+    console.error('Fetch error:', err);
+    setLoadError(true);
+  } finally {
+    setLoading(false);
+  }
+}, [user]);
 
   const refreshData = useCallback(async () => {
     if (!user) return;
@@ -165,12 +190,8 @@ export default function Wealth() {
   const netWorth = totalAccounts + totalAssets + totalInvestmentValue + totalLent - totalLiabilities - totalBorrowed;
 
   const formatCurrency = useCallback((n: number) => {
-    if (Math.abs(n) >= 10000000) return `₹${(n / 10000000).toFixed(2)}Cr`;
-    if (Math.abs(n) >= 100000) return `₹${(n / 100000).toFixed(2)}L`;
-    if (Math.abs(n) >= 1000) return `₹${(n / 1000).toFixed(1)}K`;
-    return `₹${n.toLocaleString('en-IN')}`;
-  }, []);
-
+  return `₹${n.toLocaleString('en-IN')}`;
+}, []);
   // Calculate days remaining for FD
   const getDaysRemaining = (maturityDate: string) => {
     const today = new Date();
@@ -694,20 +715,33 @@ export default function Wealth() {
     setShowForm(false);
   };
 
-  if (loading) {
-    return (
-      <div className="p-6 md:p-8 max-w-5xl mx-auto">
-        <div className="animate-pulse space-y-4">
-          <div className="h-8 w-32 bg-[var(--bg-secondary)] rounded-xl" />
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {[1, 2, 3, 4].map(i => (
-              <div key={i} className="h-28 bg-[var(--bg-card)] rounded-2xl border border-[var(--border)]" />
-            ))}
-          </div>
+  if (loadError) {
+  return (
+    <div className="p-6 md:p-8 max-w-5xl mx-auto text-center">
+      <div className="card p-8 max-w-md mx-auto">
+        <p className="text-red-400 mb-4">Failed to load wealth data</p>
+        <button onClick={() => window.location.reload()} className="btn-primary">
+          Refresh Page
+        </button>
+      </div>
+    </div>
+  );
+}
+
+if (loading) {
+  return (
+    <div className="p-6 md:p-8 max-w-5xl mx-auto">
+      <div className="animate-pulse space-y-4">
+        <div className="h-8 w-32 bg-[var(--bg-secondary)] rounded-xl" />
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {[1, 2, 3, 4].map(i => (
+            <div key={i} className="h-28 bg-[var(--bg-card)] rounded-2xl border border-[var(--border)]" />
+          ))}
         </div>
       </div>
-    );
-  }
+    </div>
+  );
+}
 
   return (
     <div className="p-6 md:p-8 max-w-5xl mx-auto animate-fade-in">

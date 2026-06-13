@@ -6,7 +6,19 @@ import {
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import type { Goal, Task, Habit, HealthLog, Investment, Business, Account, Asset, Liability, CareerTrack, CareerProfile } from '../types';
+import type { Goal, Task, Habit, HealthLog, Investment, Business, Account, Asset, Liability, CareerTrack, CareerProfile, Loan } from '../types';
+
+// Safe query for loading data - splits into groups to avoid connection pool exhaustion
+async function safeQuery<T>(queryFn: () => Promise<T>, retries = 1): Promise<T> {
+  try {
+    return await queryFn();
+  } catch (error) {
+    if (retries === 0) throw error;
+    console.log('Query failed, retrying...');
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return safeQuery(queryFn, retries - 1);
+  }
+}
 
 export default function Guide() {
   const { user, profile } = useAuth();
@@ -19,36 +31,58 @@ export default function Guide() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [liabilities, setLiabilities] = useState<Liability[]>([]);
+  const [loans, setLoans] = useState<Loan[]>([]);
   const [tracks, setTracks] = useState<CareerTrack[]>([]);
   const [careerProfile, setCareerProfile] = useState<CareerProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [climbScore, setClimbScore] = useState(0);
+  const [netWorth, setNetWorth] = useState(0);
 
-  // Load all data with parallel queries
+  // Load all data with parallel queries (split into groups)
   const loadAllData = useCallback(async () => {
     if (!user) return;
     
     setLoading(true);
+    setLoadError(false);
     try {
       const today = new Date().toISOString().split('T')[0];
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
       const dateStr = thirtyDaysAgo.toISOString().split('T')[0];
       
-      const [g, t, h, hl, inv, b, a, as, lib, tr, cp] = await Promise.all([
+      // Group 1: Goals and Tasks
+      const [g, t] = await safeQuery(async () => Promise.all([
         supabase.from('goals').select('*').eq('user_id', user.id),
         supabase.from('tasks').select('*').eq('user_id', user.id).eq('due_date', today),
+      ]));
+      
+      // Group 2: Habits and Health Logs
+      const [h, hl] = await safeQuery(async () => Promise.all([
         supabase.from('habits').select('*').eq('user_id', user.id).eq('active', true),
         supabase.from('health_logs').select('*').eq('user_id', user.id).gte('log_date', dateStr).limit(30),
+      ]));
+      
+      // Group 3: Investments and Businesses
+      const [inv, b] = await safeQuery(async () => Promise.all([
         supabase.from('investments').select('*').eq('user_id', user.id),
         supabase.from('businesses').select('*').eq('user_id', user.id),
+      ]));
+      
+      // Group 4: Accounts, Assets, Liabilities
+      const [a, as, lib] = await safeQuery(async () => Promise.all([
         supabase.from('accounts').select('*').eq('user_id', user.id),
         supabase.from('assets').select('*').eq('user_id', user.id),
         supabase.from('liabilities').select('*').eq('user_id', user.id),
+      ]));
+      
+      // Group 5: Career and Loans
+      const [tr, cp, ln] = await safeQuery(async () => Promise.all([
         supabase.from('career_tracks').select('*').eq('user_id', user.id).order('priority', { ascending: false }),
         supabase.from('career_profile').select('*').eq('id', user.id).maybeSingle(),
-      ]);
+        supabase.from('loans').select('*').eq('user_id', user.id),
+      ]));
       
       setGoals((g.data || []) as Goal[]);
       setTasks((t.data || []) as Task[]);
@@ -59,12 +93,24 @@ export default function Guide() {
       setAccounts((a.data || []) as Account[]);
       setAssets((as.data || []) as Asset[]);
       setLiabilities((lib.data || []) as Liability[]);
+      setLoans((ln.data || []) as Loan[]);
       setTracks((tr.data || []) as CareerTrack[]);
       setCareerProfile((cp.data || null) as CareerProfile | null);
+      
+      // Calculate Net Worth properly (matching Wealth page)
+      const totalAccountsSum = (a.data || []).reduce((sum: number, acc: any) => sum + (acc.balance || 0), 0);
+      const totalAssetsSum = (as.data || []).reduce((sum: number, asset: any) => sum + (asset.value || 0), 0);
+      const totalInvestmentsSum = (inv.data || []).reduce((sum: number, invItem: any) => sum + (invItem.current_value || 0), 0);
+      const totalLiabilitiesSum = (lib.data || []).reduce((sum: number, libItem: any) => sum + (libItem.amount || 0), 0);
+      const totalLent = (ln.data || []).filter((l: any) => l.type === 'lent').reduce((sum: number, l: any) => sum + (l.remaining_amount || 0), 0);
+      const totalBorrowed = (ln.data || []).filter((l: any) => l.type === 'borrowed').reduce((sum: number, l: any) => sum + (l.remaining_amount || 0), 0);
+      const netWorthVal = totalAccountsSum + totalAssetsSum + totalInvestmentsSum + totalLent - totalLiabilitiesSum - totalBorrowed;
+      setNetWorth(netWorthVal);
       
       calculateClimbScore(g.data || [], h.data || [], hl.data || [], inv.data || [], b.data || []);
     } catch (err) {
       console.error('Load error:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -202,13 +248,6 @@ export default function Guide() {
     return 'Good evening';
   };
 
-  // Calculate Net Worth properly
-  const totalAccountsSum = accounts.reduce((sum, a) => sum + (a.balance || 0), 0);
-  const totalAssetsSum = assets.reduce((sum, a) => sum + (a.value || 0), 0);
-  const totalInvestmentsSum = investments.reduce((sum, i) => sum + (i.current_value || 0), 0);
-  const totalLiabilitiesSum = liabilities.reduce((sum, l) => sum + (l.amount || 0), 0);
-  const netWorth = totalAccountsSum + totalAssetsSum + totalInvestmentsSum - totalLiabilitiesSum;
-
   // Check if user is government aspirant
   const isGovtAspirant = careerProfile?.career_type === 'government_aspirant';
   const primaryTrack = tracks.find(t => t.priority === 'primary');
@@ -246,11 +285,22 @@ export default function Guide() {
   };
 
   const formatCurrency = useCallback((n: number) => {
-    if (Math.abs(n) >= 10000000) return `₹${(n / 10000000).toFixed(2)}Cr`;
-    if (Math.abs(n) >= 100000) return `₹${(n / 100000).toFixed(2)}L`;
-    if (Math.abs(n) >= 1000) return `₹${(n / 1000).toFixed(1)}K`;
     return `₹${n.toLocaleString('en-IN')}`;
   }, []);
+
+  // Error state
+  if (loadError) {
+    return (
+      <div className="p-6 md:p-8 max-w-4xl mx-auto text-center">
+        <div className="card p-8 max-w-md mx-auto">
+          <p className="text-red-400 mb-4">Failed to load guide data</p>
+          <button onClick={() => window.location.reload()} className="btn-primary">
+            Refresh Page
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // Loading skeleton
   if (loading) {

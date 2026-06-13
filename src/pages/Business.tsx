@@ -336,11 +336,8 @@ export default function BusinessPage() {
   };
 
   const formatCurrency = useCallback((n: number) => {
-    if (Math.abs(n) >= 10000000) return `₹${(n / 10000000).toFixed(2)}Cr`;
-    if (Math.abs(n) >= 100000) return `₹${(n / 100000).toFixed(2)}L`;
-    if (Math.abs(n) >= 1000) return `₹${(n / 1000).toFixed(1)}K`;
-    return `₹${n.toLocaleString('en-IN')}`;
-  }, []);
+  return `₹${n.toLocaleString('en-IN')}`;
+}, []);
 
   // Memoized calculations
   const totalRevenue = entries.filter(e => e.type === 'revenue').reduce((s, e) => s + e.amount, 0);

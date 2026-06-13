@@ -49,6 +49,18 @@ let careerCache: {
 } | null = null;
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
+// Safe query for loading data - splits into groups to avoid connection pool exhaustion
+async function safeQuery<T>(queryFn: () => Promise<T>, retries = 1): Promise<T> {
+  try {
+    return await queryFn();
+  } catch (error) {
+    if (retries === 0) throw error;
+    console.log('Query failed, retrying...');
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return safeQuery(queryFn, retries - 1);
+  }
+}
+
 export default function Career() {
   const { user } = useAuth();
   const [profile, setProfile] = useState<CareerProfile | null>(null);
@@ -64,6 +76,7 @@ export default function Career() {
   const [loading, setLoading] = useState(true);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const loadingRef = useRef(false);
 
   // Profile form state
@@ -129,7 +142,7 @@ export default function Career() {
     warmupConnection();
   }, [user]);
 
-  // Load all data with caching
+  // Load all data with caching and grouping
   const loadAllData = useCallback(async (forceRefresh = false) => {
     if (!user) return;
     
@@ -149,14 +162,24 @@ export default function Career() {
     loadingRef.current = true;
     
     setLoading(true);
+    setLoadError(false);
     try {
-      const [p, o, s, i, t] = await Promise.all([
+      // Group 1: Profile and Tracks (most important)
+      const [p, t] = await safeQuery(async () => Promise.all([
         supabase.from('career_profile').select('*').eq('id', user.id).maybeSingle(),
+        supabase.from('career_tracks').select('*').eq('user_id', user.id).order('priority', { ascending: false }),
+      ]));
+      
+      // Group 2: Opportunities and Skills
+      const [o, s] = await safeQuery(async () => Promise.all([
         supabase.from('opportunities').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50),
         supabase.from('career_skills').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50),
+      ]));
+      
+      // Group 3: Interview Prep
+      const [i] = await safeQuery(async () => Promise.all([
         supabase.from('interview_prep').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(100),
-        supabase.from('career_tracks').select('*').eq('user_id', user.id).order('priority', { ascending: false }),
-      ]);
+      ]));
       
       const cp = p.data as CareerProfile | null;
       setProfile(cp);
@@ -202,6 +225,7 @@ export default function Career() {
       
     } catch (err) {
       console.error('Load error:', err);
+      setLoadError(true);
     } finally {
       setLoading(false);
       setInitialLoadDone(true);
@@ -254,44 +278,37 @@ export default function Career() {
     setSaving(false);
   };
 
-  // Track CRUD with retry
+  // Track CRUD
   const addTrack = async () => {
     if (!trackTitle.trim() || !user) return;
     if (saving) return;
     
     setSaving(true);
     
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const { data, error } = await supabase.from('career_tracks').insert({
-          user_id: user.id,
-          type: trackType,
-          title: trackTitle.trim(),
-          company_or_exam: trackCompany.trim(),
-          priority: trackPriority,
-          target_date: trackTargetDate || null,
-          status: 'active'
-        }).select().single();
-        
-        if (error) throw error;
-        
-        if (data) {
-          setTracks(prev => [data as CareerTrack, ...prev]);
-          careerCache = null;
-          resetTrackForm();
-          setSaving(false);
-          return;
-        }
-      } catch (err: any) {
-        console.error(`Attempt ${attempt} failed:`, err.message);
-        if (attempt < 3) {
-          await new Promise(resolve => setTimeout(resolve, attempt * 500));
-        } else {
-          alert(`Failed to add track: ${err.message}`);
-        }
+    try {
+      const { data, error } = await supabase.from('career_tracks').insert({
+        user_id: user.id,
+        type: trackType,
+        title: trackTitle.trim(),
+        company_or_exam: trackCompany.trim(),
+        priority: trackPriority,
+        target_date: trackTargetDate || null,
+        status: 'active'
+      }).select().single();
+      
+      if (error) throw error;
+      
+      if (data) {
+        setTracks(prev => [data as CareerTrack, ...prev]);
+        careerCache = null;
+        resetTrackForm();
       }
+    } catch (err: any) {
+      console.error('Add track error:', err);
+      alert(`Failed to add track: ${err.message}`);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const deleteTrack = async (id: string) => {
@@ -310,44 +327,37 @@ export default function Career() {
     setShowTrackForm(false);
   };
 
-  // Opportunity CRUD with retry
+  // Opportunity CRUD
   const addOpp = async () => {
     if (!oppTitle.trim() || !user) return;
     if (saving) return;
     
     setSaving(true);
     
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const { data, error } = await supabase.from('opportunities').insert({
-          user_id: user.id, 
-          title: oppTitle.trim(), 
-          type: oppType,
-          company: oppCompany, 
-          status: oppStatus, 
-          notes: oppNotes,
-          applied_date: appliedDate || null,
-        }).select().single();
-        
-        if (error) throw error;
-        
-        if (data) {
-          setOpportunities(prev => [data as Opportunity, ...prev]);
-          careerCache = null;
-          resetOppForm();
-          setSaving(false);
-          return;
-        }
-      } catch (err: any) {
-        console.error(`Attempt ${attempt} failed:`, err.message);
-        if (attempt < 3) {
-          await new Promise(resolve => setTimeout(resolve, attempt * 500));
-        } else {
-          alert(`Failed to add opportunity: ${err.message}`);
-        }
+    try {
+      const { data, error } = await supabase.from('opportunities').insert({
+        user_id: user.id, 
+        title: oppTitle.trim(), 
+        type: oppType,
+        company: oppCompany, 
+        status: oppStatus, 
+        notes: oppNotes,
+        applied_date: appliedDate || null,
+      }).select().single();
+      
+      if (error) throw error;
+      
+      if (data) {
+        setOpportunities(prev => [data as Opportunity, ...prev]);
+        careerCache = null;
+        resetOppForm();
       }
+    } catch (err: any) {
+      console.error('Add opportunity error:', err);
+      alert(`Failed to add opportunity: ${err.message}`);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const deleteOpp = async (id: string) => {
@@ -375,7 +385,7 @@ export default function Career() {
     setShowOppForm(false);
   };
 
-  // Skill CRUD with retry
+  // Skill CRUD
   const addSkill = async () => {
     if (!skillName.trim()) {
       alert('Please enter a skill name');
@@ -386,47 +396,34 @@ export default function Career() {
     
     setSaving(true);
     
-    const skillData = {
-      name: skillName.trim(),
-      level: skillLevel,
-      category: skillCategory,
-    };
-    
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const { data, error } = await supabase
-          .from('career_skills')
-          .insert({
-            user_id: user.id,
-            name: skillData.name,
-            level: skillData.level,
-            category: skillData.category,
-          })
-          .select()
-          .single();
-        
-        if (error) throw error;
-        
-        if (data) {
-          setSkills(prev => [data as CareerSkill, ...prev]);
-          careerCache = null;
-          setSkillName('');
-          setSkillLevel('Intermediate');
-          setSkillCategory('Technical');
-          setShowSkillForm(false);
-          setSaving(false);
-          return;
-        }
-      } catch (err: any) {
-        console.error(`Attempt ${attempt} failed:`, err.message);
-        if (attempt < 3) {
-          await new Promise(resolve => setTimeout(resolve, attempt * 500));
-        } else {
-          alert(`Failed to add skill: ${err.message}`);
-        }
+    try {
+      const { data, error } = await supabase
+        .from('career_skills')
+        .insert({
+          user_id: user.id,
+          name: skillName.trim(),
+          level: skillLevel,
+          category: skillCategory,
+        })
+        .select()
+        .single();
+      
+      if (error) throw error;
+      
+      if (data) {
+        setSkills(prev => [data as CareerSkill, ...prev]);
+        careerCache = null;
+        setSkillName('');
+        setSkillLevel('Intermediate');
+        setSkillCategory('Technical');
+        setShowSkillForm(false);
       }
+    } catch (err: any) {
+      console.error('Add skill error:', err);
+      alert(`Failed to add skill: ${err.message}`);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const deleteSkill = async (id: string) => {
@@ -450,36 +447,29 @@ export default function Career() {
     
     setSaving(true);
     
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const { data, error } = await supabase.from('interview_prep').insert({
-          user_id: user.id,
-          opportunity_id: opportunityId,
-          question: interviewQuestion.trim(),
-          answer: interviewAnswer.trim(),
-          status: 'pending',
-        }).select().single();
-        
-        if (error) throw error;
-        
-        if (data) {
-          setInterviewPrep(prev => [data as InterviewPrep, ...prev]);
-          setInterviewQuestion('');
-          setInterviewAnswer('');
-          setShowInterviewForm(null);
-          setSaving(false);
-          return;
-        }
-      } catch (err: any) {
-        console.error(`Attempt ${attempt} failed:`, err.message);
-        if (attempt < 3) {
-          await new Promise(resolve => setTimeout(resolve, attempt * 500));
-        } else {
-          alert(`Failed to add question: ${err.message}`);
-        }
+    try {
+      const { data, error } = await supabase.from('interview_prep').insert({
+        user_id: user.id,
+        opportunity_id: opportunityId,
+        question: interviewQuestion.trim(),
+        answer: interviewAnswer.trim(),
+        status: 'pending',
+      }).select().single();
+      
+      if (error) throw error;
+      
+      if (data) {
+        setInterviewPrep(prev => [data as InterviewPrep, ...prev]);
+        setInterviewQuestion('');
+        setInterviewAnswer('');
+        setShowInterviewForm(null);
       }
+    } catch (err: any) {
+      console.error('Add interview question error:', err);
+      alert(`Failed to add question: ${err.message}`);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const deleteInterviewQuestion = async (id: string) => {
@@ -493,7 +483,7 @@ export default function Career() {
   };
 
   // Calculations
-  const formatSalary = (n?: number) => n ? `₹${(n / 100000).toFixed(1)}L` : '—';
+  const formatSalary = (n?: number) => n ? `₹${n.toLocaleString('en-IN')}` : '—';
   
   const careerScore = calculateCareerScore(profile, opportunities, skills);
   
@@ -523,6 +513,20 @@ export default function Career() {
     : 0;
 
   const isGovtAspirant = careerType === 'government_aspirant';
+
+  // Error state
+  if (loadError) {
+    return (
+      <div className="p-6 md:p-8 max-w-5xl mx-auto text-center">
+        <div className="card p-8 max-w-md mx-auto">
+          <p className="text-red-400 mb-4">Failed to load career data</p>
+          <button onClick={() => window.location.reload()} className="btn-primary">
+            Refresh Page
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // Loading skeleton
   if (loading && !initialLoadDone) {
